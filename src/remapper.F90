@@ -354,10 +354,11 @@ module remapper
     end function can_remap_field
 
 
-    integer function remap_field_dryrun(remap_info, src_field, dst_field) result(stat)
+    integer function remap_field_dryrun(nVertLevels,nOznLevels,nSoilLevels,&
+                          remap_info, src_field, dst_field) result(stat)
 
         implicit none
-
+        integer, intent(in   ) :: nVertLevels,nOznLevels,nSoilLevels
         type (remap_info_type), intent(in) :: remap_info
         type (input_field_type), intent(in) :: src_field
         type (target_field_type), intent(out) :: dst_field
@@ -387,18 +388,64 @@ module remapper
         dst_field % dimnames(1) = 'longitude'
         dst_field % dimlens(2) = remap_info % dst_mesh % nlat
         dst_field % dimnames(2) = 'latitude'
-
+ 
         ! Based on ordering of dimensions in source field, set dimension names
         ! in the destination field
         if (iand(fld_class, MPAS_MASK) > 0) then
             do idim=1,dst_field % ndims-2
+               If(src_field % dimnames(idim) == 'u_iso_levels')then
+                dst_field % dimlens(2+idim) = src_field % dimlens(idim)
+                dst_field % dimnames(2+idim) = 'level'
+               else If(src_field % dimnames(idim) == 't_iso_levels')then
+                dst_field % dimlens(2+idim) = src_field % dimlens(idim)
+                dst_field % dimnames(2+idim) = 'level'
+               else If(src_field % dimnames(idim) == 'z_iso_levels')then
+                dst_field % dimlens(2+idim) = src_field % dimlens(idim)
+                dst_field % dimnames(2+idim) = 'level'
+               else If(src_field % dimnames(idim) == 'nVertLevels')then
+                dst_field % dimlens(2+idim) = nVertLevels
+                dst_field % dimnames(2+idim) = 'level'
+               else If(src_field % dimnames(idim) == 'nVertLevelsP1')then
+                  dst_field % dimlens(2+idim)  = nVertLevels+1
+                  dst_field % dimnames(2+idim) = 'level'
+               else If(src_field % dimnames(idim) == 'nOznLevels')then
+                  dst_field % dimlens(2+idim)  = nOznLevels
+                  dst_field % dimnames(2+idim) = 'level'
+               else If(src_field % dimnames(idim) == 'nSoilLevels')then
+                  dst_field % dimlens(2+idim)  = nSoilLevels
+                  dst_field % dimnames(2+idim) = 'level'
+               else
                 dst_field % dimlens(2+idim) = src_field % dimlens(idim)
                 dst_field % dimnames(2+idim) = src_field % dimnames(idim)
+               end if 
             end do
         else if (iand(fld_class, CAM_MASK) > 0) then
             do idim=2,dst_field % ndims-1
-                dst_field % dimlens(idim+1) = src_field % dimlens(idim)
-                dst_field % dimnames(idim+1) = src_field % dimnames(idim)
+               If(src_field % dimnames(idim) == 'u_iso_levels')then
+                  dst_field % dimlens(idim+1) = src_field % dimlens(idim)
+                  dst_field % dimnames(idim+1) = 'level'
+               else If(src_field % dimnames(idim) == 't_iso_levels')then
+                  dst_field % dimlens(idim+1) = src_field % dimlens(idim)
+                  dst_field % dimnames(idim+1) = 'level'
+               else If(src_field % dimnames(idim) == 'z_iso_levels')then
+                  dst_field % dimlens(idim+1)  = src_field % dimlens(idim)
+                  dst_field % dimnames(idim+1) = 'level'
+               else If(src_field % dimnames(idim) == 'nVertLevels')then
+                  dst_field % dimlens(idim+1)  = nVertLevels
+                  dst_field % dimnames(idim+1) = 'level'
+               else If(src_field % dimnames(idim) == 'nVertLevelsP1')then
+                  dst_field % dimlens(idim+1)  = nVertLevels+1
+                  dst_field % dimnames(idim+1) = 'level'
+               else If(src_field % dimnames(idim) == 'nOznLevels')then
+                  dst_field % dimlens(idim+1)  = nOznLevels
+                  dst_field % dimnames(idim+1) = 'level'
+               else If(src_field % dimnames(idim) == 'nSoilLevels')then
+                  dst_field % dimlens(idim+1)  = nSoilLevels
+                  dst_field % dimnames(idim+1) = 'level'
+               else
+                  dst_field % dimlens(idim+1)  = src_field % dimlens(idim)
+                  dst_field % dimnames(idim+1) = src_field % dimnames(idim)
+               endif
             end do
         else
             write(0,*) 'Remap dryrun exception: unhandled field class'
@@ -810,6 +857,225 @@ module remapper
     end function remap_field
 
 
+    integer function remap_field1D(verticalCoord,remap_info, src_field, dst_field) result(stat)
+
+        implicit none
+
+        character(len=*), intent(in) :: verticalCoord
+        type (remap_info_type), intent(in) :: remap_info
+        type (input_field_type), intent(in) :: src_field
+        type (target_field_type), intent(out) :: dst_field
+
+        integer :: idim
+        integer :: j
+        integer :: iy, ix
+        integer, dimension(:,:), pointer :: nearestIndex
+        integer, dimension(:,:,:), pointer :: sourceNodes
+        real, dimension(:,:,:), pointer :: nodeWeights
+        integer :: fld_class
+
+        stat = 0
+
+        fld_class = field_class(src_field % dimnames)
+
+        ! Based on mesh element type, set remapping weight fields
+        if (iand(fld_class, CELL_MASK) > 0) then
+            nearestIndex => remap_info % nearestCell
+            sourceNodes => remap_info % sourceCells
+            nodeWeights => remap_info % cellWeights
+        else if (iand(fld_class, VTX_MASK) > 0) then
+            nearestIndex => remap_info % nearestVertex
+            sourceNodes => remap_info % sourceVertices
+            nodeWeights => remap_info % vertexWeights
+        else if (iand(fld_class, EDGE_MASK) > 0) then
+            nearestIndex => remap_info % nearestEdge
+            sourceNodes => remap_info % sourceEdges
+            nodeWeights => remap_info % edgeWeights
+        else
+            write(0,*) 'Remap exception: unhandled decomposed dim'
+            stat = 1
+            
+        end if
+
+        dst_field % name = src_field % name
+        dst_field % xtype = src_field % xtype
+        if (src_field % isTimeDependent) then
+            ! Single horizontal dimension becomes two horizontal dimensions, nlat and nlon,
+            ! but the time dimension is not counted in the target field
+            dst_field % ndims = src_field % ndims
+        else
+            ! Single horizontal dimension becomes two horizontal dimensions, nlat and nlon
+            dst_field % ndims = src_field % ndims 
+        end if
+        allocate(dst_field % dimnames(dst_field % ndims))
+        allocate(dst_field % dimlens(dst_field % ndims))
+ 
+        dst_field % isTimeDependent = src_field % isTimeDependent
+ PRINT*,'------------------->>-',trim(src_field % name)
+        if (trim(src_field % name) == 't_iso_levels')then
+           dst_field % dimlens(1) = src_field % dimlens(1)
+           dst_field % dimnames(1) = 'level'
+        else if (trim(src_field % name) == 'u_iso_levels')then
+           dst_field % dimlens(1) = src_field % dimlens(1)
+           dst_field % dimnames(1) = 'level'
+	else if (trim(src_field % name) == 'z_iso_levels')then
+           dst_field % dimlens(1) =  src_field % dimlens(1)
+           dst_field % dimnames(1) = 'level'
+        endif  
+        ! Based on ordering of dimensions in source field, set dimension names
+        ! in the destination field
+        if (iand(fld_class, MPAS_MASK) > 0) then
+            do idim=1,dst_field % ndims-2
+                dst_field % dimlens(2+idim) = src_field % dimlens(idim)
+                dst_field % dimnames(2+idim) = src_field % dimnames(idim)
+            end do
+        else
+            do idim=2,dst_field % ndims-1
+                dst_field % dimlens(idim+1)  = src_field % dimlens(idim)
+                dst_field % dimnames(idim+1) = src_field % dimnames(idim)
+            end do
+        end if
+        allocate(dst_field % array1r(dst_field % dimlens(1)))
+        if (trim(src_field % name) == 't_iso_levels')then
+             DO idim=1,dst_field % dimlens(1)
+                !dst_field % array1r(idim) = src_field % array1r(dst_field % dimlens(1)+1-idim)
+                 dst_field % array1r(idim) = src_field % array1r(idim)
+             END DO
+        else if (trim(src_field % name) == 'u_iso_levels')then
+             DO idim=1,dst_field % dimlens(1)
+                !dst_field % array1r(idim) = src_field % array1r(dst_field % dimlens(1)+1-idim)
+                dst_field % array1r(idim) = src_field % array1r(idim)
+             END DO
+	else if (trim(src_field % name) == 'z_iso_levels')then
+             DO idim=1,dst_field % dimlens(1)
+                !dst_field % array1r(idim) = src_field % array1r(dst_field % dimlens(1)+1-idim)
+                dst_field % array1r(idim) = src_field % array1r(idim)
+             END DO
+        endif  
+
+    end function remap_field1D
+
+
+    integer function remap_field1DM(nVertLevels,remap_info, dst_field) result(stat)
+
+        implicit none
+
+        integer, intent(in) :: nVertLevels
+        type (remap_info_type), intent(in) :: remap_info
+
+        type (target_field_type), intent(out) :: dst_field
+
+        integer :: idim
+        integer :: j
+        integer :: iy, ix
+
+        stat = 0
+
+        dst_field % name  = 'level'
+        dst_field % xtype = FIELD_TYPE_REAL
+        
+        ! Single horizontal dimension becomes two horizontal dimensions, nlat and nlon
+        
+        dst_field % ndims = 1
+
+        allocate(dst_field % dimnames(dst_field % ndims))
+        allocate(dst_field % dimlens (dst_field % ndims))
+ 
+        dst_field % isTimeDependent = .false.
+        
+        dst_field % dimlens(1) = nVertLevels
+        dst_field % dimnames(1) = 'level'
+
+        allocate(dst_field % array1r(dst_field % dimlens(1)))
+
+        DO idim=1,dst_field % dimlens(1)
+            !dst_field % array1r(idim) = nVertLevels + 1 - idim 
+            dst_field % array1r(idim) = idim 
+
+        END DO
+
+    end function remap_field1DM
+    
+    
+    
+    
+    integer function remap_fieldTime(remap_info, src_field, dst_field) result(stat)
+
+        implicit none
+
+        type (remap_info_type), intent(in) :: remap_info
+        type (input_field_type), intent(in) :: src_field
+        type (target_field_type), intent(out) :: dst_field
+
+        integer :: idim
+        integer :: j
+        integer :: iy, ix
+        integer, dimension(:,:), pointer :: nearestIndex
+        integer, dimension(:,:,:), pointer :: sourceNodes
+        real, dimension(:,:,:), pointer :: nodeWeights
+        integer :: fld_class
+
+        stat = 0
+
+        fld_class = field_class(src_field % dimnames)
+
+        ! Based on mesh element type, set remapping weight fields
+        if (iand(fld_class, CELL_MASK) > 0) then
+            nearestIndex => remap_info % nearestCell
+            sourceNodes => remap_info % sourceCells
+            nodeWeights => remap_info % cellWeights
+        else if (iand(fld_class, VTX_MASK) > 0) then
+            nearestIndex => remap_info % nearestVertex
+            sourceNodes => remap_info % sourceVertices
+            nodeWeights => remap_info % vertexWeights
+        else if (iand(fld_class, EDGE_MASK) > 0) then
+            nearestIndex => remap_info % nearestEdge
+            sourceNodes => remap_info % sourceEdges
+            nodeWeights => remap_info % edgeWeights
+        else
+            write(0,*) 'Remap exception: unhandled decomposed dim'
+            stat = 1
+            
+        end if
+
+        dst_field % name = src_field % name
+        dst_field % xtype = src_field % xtype
+        if (src_field % isTimeDependent) then
+            ! Single horizontal dimension becomes two horizontal dimensions, nlat and nlon,
+            ! but the time dimension is not counted in the target field
+            dst_field % ndims = src_field % ndims
+        else
+            ! Single horizontal dimension becomes two horizontal dimensions, nlat and nlon
+            dst_field % ndims = src_field % ndims 
+        end if
+        allocate(dst_field % dimnames(dst_field % ndims))
+        allocate(dst_field % dimlens(dst_field % ndims))
+        dst_field % isTimeDependent = src_field % isTimeDependent
+
+        dst_field % dimlens(1) = 1
+        dst_field % dimnames(1) = 'Time'
+
+        ! Based on ordering of dimensions in source field, set dimension names
+        ! in the destination field
+        if (iand(fld_class, MPAS_MASK) > 0) then
+            do idim=1,dst_field % ndims-2
+                dst_field % dimlens(2+idim) = src_field % dimlens(idim)
+                dst_field % dimnames(2+idim) = src_field % dimnames(idim)
+            end do
+        else
+            do idim=2,dst_field % ndims-1
+                dst_field % dimlens(idim+1) = src_field % dimlens(idim)
+                dst_field % dimnames(idim+1) = src_field % dimnames(idim)
+            end do
+        end if
+        allocate(dst_field % array1d(dst_field % dimlens(1)))
+           if (trim(src_field % name) == 'xtime')then
+             DO idim=1,dst_field % dimlens(1)
+                dst_field % array1d(idim) = 0
+             END DO
+        endif
+    end function remap_fieldTime
+
     integer function remap_get_target_latitudes(remap_info, lat_field) result(stat)
 
         implicit none
@@ -867,6 +1133,149 @@ module remapper
 
     end function remap_get_target_longitudes
 
+    integer function remap_get_target_t_iso_levels(remap_info, t_iso_levels_field,nlevels) result(stat)
+
+        implicit none
+
+        type (remap_info_type), intent(in) :: remap_info
+        type (target_field_type), intent(out) :: t_iso_levels_field
+        Integer, intent(in) :: nlevels
+
+        real, parameter :: rad2deg = 90.0 / asin(1.0)
+
+        stat = 0
+
+
+        t_iso_levels_field % name = 'level'
+        t_iso_levels_field % xtype = FIELD_TYPE_REAL
+        t_iso_levels_field % ndims = 1
+        t_iso_levels_field % isTimeDependent = .false.
+
+        allocate(t_iso_levels_field % dimnames(t_iso_levels_field % ndims))
+        allocate(t_iso_levels_field % dimlens(t_iso_levels_field % ndims))
+
+        t_iso_levels_field % dimnames(1) = 'level'
+        t_iso_levels_field % dimlens(1) = nlevels
+
+        allocate(t_iso_levels_field % array1r(t_iso_levels_field % dimlens(1)))
+        t_iso_levels_field % array1r(:) =  rad2deg
+
+    end function remap_get_target_t_iso_levels
+
+    integer function remap_get_target_u_iso_levels(remap_info, u_iso_levels_field,nlevels) result(stat)
+
+        implicit none
+
+        type (remap_info_type), intent(in) :: remap_info
+        type (target_field_type), intent(out) :: u_iso_levels_field
+        Integer, intent(in) :: nlevels
+        real, parameter :: rad2deg = 90.0 / asin(1.0)
+
+        stat = 0
+
+
+        u_iso_levels_field % name = 'level'
+        u_iso_levels_field % xtype = FIELD_TYPE_REAL
+        u_iso_levels_field % ndims = 1
+        u_iso_levels_field % isTimeDependent = .false.
+
+        allocate(u_iso_levels_field % dimnames(u_iso_levels_field % ndims))
+        allocate(u_iso_levels_field % dimlens(u_iso_levels_field % ndims))
+
+        u_iso_levels_field % dimnames(1) = 'level'
+        u_iso_levels_field % dimlens(1) = nlevels
+
+        allocate(u_iso_levels_field % array1r(u_iso_levels_field % dimlens(1)))
+        u_iso_levels_field % array1r(:) =  rad2deg
+
+    end function remap_get_target_u_iso_levels
+ 
+ 
+ 
+     integer function remap_get_target_nVertLevels(remap_info, Vert_levels_field,nlevels) result(stat)
+
+        implicit none
+
+        type (remap_info_type), intent(in) :: remap_info
+        type (target_field_type), intent(out) :: Vert_levels_field
+        Integer, intent(in) :: nlevels
+        real, parameter :: rad2deg = 90.0 / asin(1.0)
+
+        stat = 0
+
+        Vert_levels_field % name = 'level'
+        Vert_levels_field % xtype = FIELD_TYPE_REAL
+        Vert_levels_field % ndims = 1
+        Vert_levels_field % isTimeDependent = .false.
+
+        allocate(Vert_levels_field % dimnames(Vert_levels_field % ndims))
+        allocate(Vert_levels_field % dimlens (Vert_levels_field % ndims))
+
+        Vert_levels_field % dimnames(1) = 'level'
+        Vert_levels_field % dimlens(1) = nlevels
+
+        allocate(Vert_levels_field % array1r(Vert_levels_field % dimlens(1)))
+        Vert_levels_field % array1r(:) =  rad2deg
+
+    end function remap_get_target_nVertLevels
+ 
+    
+    integer function remap_get_target_z_iso_levels(remap_info, z_iso_levels_field,nlevels) result(stat)
+
+        implicit none
+
+        type (remap_info_type), intent(in) :: remap_info
+        type (target_field_type), intent(out) :: z_iso_levels_field
+        Integer, intent(in) :: nlevels
+
+        real, parameter :: rad2deg = 90.0 / asin(1.0)
+
+        stat = 0
+
+
+        z_iso_levels_field % name = 'level'
+        z_iso_levels_field % xtype = FIELD_TYPE_REAL
+        z_iso_levels_field % ndims = 1
+        z_iso_levels_field % isTimeDependent = .false.
+
+        allocate(z_iso_levels_field % dimnames(z_iso_levels_field % ndims))
+        allocate(z_iso_levels_field % dimlens(z_iso_levels_field % ndims))
+
+        z_iso_levels_field % dimnames(1) = 'level'
+        z_iso_levels_field % dimlens(1) = nlevels
+
+        allocate(z_iso_levels_field % array1r(z_iso_levels_field % dimlens(1)))
+        z_iso_levels_field % array1r(:) =  rad2deg
+
+    end function remap_get_target_z_iso_levels
+
+    integer function remap_get_target_time(remap_info, time_field) result(stat)
+
+        implicit none
+
+        type (remap_info_type), intent(in) :: remap_info
+        type (target_field_type), intent(out) :: time_field
+
+        real, parameter :: rad2deg = 90.0 / asin(1.0)
+
+        stat = 0
+
+
+        time_field % name = 'Time'
+        time_field % xtype = FIELD_TYPE_REAL
+        time_field % ndims = 1
+        time_field % isTimeDependent = .false.
+
+        allocate(time_field % dimnames(time_field % ndims))
+        allocate(time_field % dimlens(time_field % ndims))
+
+        time_field % dimnames(1) = 'Time'
+        time_field % dimlens(1) = 1
+
+        allocate(time_field % array1d(time_field % dimlens(1)))
+        time_field % array1d(:) =  0
+
+    end function remap_get_target_time
 
     integer function free_target_field(field) result(stat)
 
