@@ -1,47 +1,43 @@
 module timer
 
-    integer, parameter :: I8KIND = selected_int_kind(18)
+   integer, parameter :: I8KIND = selected_int_kind(18)
 
-    type timer_type
-        integer(kind=I8KIND) :: count_start
-        integer(kind=I8KIND) :: count_stop
-        integer(kind=I8KIND) :: count_rate
-    end type timer_type
+   type timer_type
+      integer(kind=I8KIND) :: count_start
+      integer(kind=I8KIND) :: count_stop
+      integer(kind=I8KIND) :: count_rate
+   end type timer_type
 
+contains
 
-    contains
+   subroutine timer_start(t)
 
+      implicit none
 
-    subroutine timer_start(t)
+      type(timer_type), intent(out) :: t
 
-        implicit none
+      call system_clock(count=t%count_start, count_rate=t%count_rate)
 
-        type (timer_type), intent(out) :: t
+   end subroutine timer_start
 
-        call system_clock(count=t % count_start, count_rate=t % count_rate)
-       
-    end subroutine timer_start
+   subroutine timer_stop(t)
 
+      implicit none
 
-    subroutine timer_stop(t)
+      type(timer_type), intent(inout) :: t
 
-        implicit none
+      call system_clock(count=t%count_stop)
 
-        type (timer_type), intent(inout) :: t
+   end subroutine timer_stop
 
-        call system_clock(count=t % count_stop)
-       
-    end subroutine timer_stop
+   double precision function timer_time(t)
 
+      implicit none
 
-    double precision function timer_time(t)
+      type(timer_type), intent(in) :: t
 
-        implicit none
+      timer_time = dble(t%count_stop - t%count_start)/dble(t%count_rate)
 
-        type (timer_type), intent(in) :: t
-
-        timer_time = dble(t % count_stop - t % count_start) / dble(t % count_rate)
-
-    end function timer_time
+   end function timer_time
 
 end module timer

@@ -1,1712 +1,1670 @@
 module remapper
 
-    use netcdf, only : NF90_FILL_FLOAT, NF90_FILL_DOUBLE, NF90_FILL_INT
-    use mpas_mesh
-    use scan_input, only : input_field_type, FIELD_TYPE_REAL, FIELD_TYPE_DOUBLE, FIELD_TYPE_INTEGER
-    use target_mesh
+   use netcdf, only: NF90_FILL_FLOAT, NF90_FILL_DOUBLE, NF90_FILL_INT
+   use mpas_mesh
+   use scan_input, only: input_field_type, FIELD_TYPE_REAL, FIELD_TYPE_DOUBLE, FIELD_TYPE_INTEGER
+   use target_mesh
 
+   type remap_info_type
+      integer :: method = -1
+      type(mpas_mesh_type), pointer :: src_mesh
+      type(target_mesh_type), pointer :: dst_mesh
 
-    type remap_info_type
-        integer :: method = -1
-        type (mpas_mesh_type), pointer :: src_mesh
-        type (target_mesh_type), pointer :: dst_mesh
+      ! For nearest-neighbor
+      integer, dimension(:, :), pointer :: nearestCell => null()
+      integer, dimension(:, :), pointer :: nearestVertex => null()
+      integer, dimension(:, :), pointer :: nearestEdge => null()
 
-        ! For nearest-neighbor
-        integer, dimension(:,:), pointer :: nearestCell => null()
-        integer, dimension(:,:), pointer :: nearestVertex => null()
-        integer, dimension(:,:), pointer :: nearestEdge => null()
+      ! For Wachspress interpolation
+      real, dimension(:, :, :), pointer :: cellWeights => null()
+      real, dimension(:, :, :), pointer :: vertexWeights => null()
+      real, dimension(:, :, :), pointer :: edgeWeights => null()
+      integer, dimension(:, :, :), pointer :: sourceCells => null()
+      integer, dimension(:, :, :), pointer :: sourceVertices => null()
+      integer, dimension(:, :, :), pointer :: sourceEdges => null()
+   end type remap_info_type
 
-        ! For Wachspress interpolation
-        real, dimension(:,:,:), pointer :: cellWeights => null()
-        real, dimension(:,:,:), pointer :: vertexWeights => null()
-        real, dimension(:,:,:), pointer :: edgeWeights => null()
-        integer, dimension(:,:,:), pointer :: sourceCells => null()
-        integer, dimension(:,:,:), pointer :: sourceVertices => null()
-        integer, dimension(:,:,:), pointer :: sourceEdges => null()
-    end type remap_info_type
+   type target_field_type
+      character(len=64) :: name
+      integer :: ndims = -1
+      integer :: xtype = -1
+      logical :: isTimeDependent = .false.
+      integer, dimension(:), pointer :: dimlens => null()
+      character(len=64), dimension(:), pointer :: dimnames => null()
 
+      !  Members to store field data
+      real :: array0r
+      real, dimension(:), pointer :: array1r => null()
+      real, dimension(:, :), pointer :: array2r => null()
+      real, dimension(:, :, :), pointer :: array3r => null()
+      real, dimension(:, :, :, :), pointer :: array4r => null()
+      double precision :: array0d
+      double precision, dimension(:), pointer :: array1d => null()
+      double precision, dimension(:, :), pointer :: array2d => null()
+      double precision, dimension(:, :, :), pointer :: array3d => null()
+      double precision, dimension(:, :, :, :), pointer :: array4d => null()
+      integer :: array0i
+      integer, dimension(:), pointer :: array1i => null()
+      integer, dimension(:, :), pointer :: array2i => null()
+      integer, dimension(:, :, :), pointer :: array3i => null()
+      integer, dimension(:, :, :, :), pointer :: array4i => null()
+   end type target_field_type
 
-    type target_field_type
-        character (len=64) :: name
-        integer :: ndims = -1
-        integer :: xtype = -1
-        logical :: isTimeDependent = .false.
-        integer, dimension(:), pointer :: dimlens => null()
-        character (len=64), dimension(:), pointer :: dimnames => null()
+   ! Classes of fields that can be remapped
+   integer, parameter, private :: MPAS_CELL_FIELD = 1, & ! 0x01
+                                  MPAS_VTX_FIELD = 2, & ! 0x02
+                                  MPAS_EDGE_FIELD = 4, & ! 0x04
+                                  CAM_CELL_FIELD = 16, & ! 0x10
+                                  CAM_VTX_FIELD = 32, & ! 0x20
+                                  CAM_EDGE_FIELD = 64, & ! 0x40
+                                  UNSUPPORTED_FIELD = 0
 
-        !  Members to store field data
-        real :: array0r
-        real, dimension(:), pointer :: array1r => null()
-        real, dimension(:,:), pointer :: array2r => null()
-        real, dimension(:,:,:), pointer :: array3r => null()
-        real, dimension(:,:,:,:), pointer :: array4r => null()
-        double precision :: array0d
-        double precision, dimension(:), pointer :: array1d => null()
-        double precision, dimension(:,:), pointer :: array2d => null()
-        double precision, dimension(:,:,:), pointer :: array3d => null()
-        double precision, dimension(:,:,:,:), pointer :: array4d => null()
-        integer :: array0i
-        integer, dimension(:), pointer :: array1i => null()
-        integer, dimension(:,:), pointer :: array2i => null()
-        integer, dimension(:,:,:), pointer :: array3i => null()
-        integer, dimension(:,:,:,:), pointer :: array4i => null()
-    end type target_field_type
+   ! Mask for field class to determine dimension ordering
+   integer, parameter, private :: MPAS_MASK = 7, & ! 0x07
+                                  CAM_MASK = 112 ! 0x70
 
-    ! Classes of fields that can be remapped
-    integer, parameter, private :: MPAS_CELL_FIELD   =  1, &  ! 0x01
-                                   MPAS_VTX_FIELD    =  2, &  ! 0x02
-                                   MPAS_EDGE_FIELD   =  4, &  ! 0x04
-                                   CAM_CELL_FIELD    = 16, &  ! 0x10
-                                   CAM_VTX_FIELD     = 32, &  ! 0x20
-                                   CAM_EDGE_FIELD    = 64, &  ! 0x40
-                                   UNSUPPORTED_FIELD = 0
+   ! Mask for field class to determine mesh element type
+   integer, parameter, private :: CELL_MASK = 17, & ! 0x11
+                                  VTX_MASK = 34, & ! 0x22
+                                  EDGE_MASK = 68 ! 0x44
 
-    ! Mask for field class to determine dimension ordering
-    integer, parameter, private :: MPAS_MASK   =   7, &  ! 0x07
-                                   CAM_MASK    = 112     ! 0x70
+   private :: nearest_cell, &
+              nearest_vertex, &
+              sphere_distance, &
+              mpas_arc_length, &
+              mpas_triangle_signed_area_sphere, &
+              mpas_wachspress_coordinates, &
+              convert_lx, &
+              index2d
 
-    ! Mask for field class to determine mesh element type
-    integer, parameter, private :: CELL_MASK   =  17, &  ! 0x11
-                                   VTX_MASK    =  34, &  ! 0x22
-                                   EDGE_MASK   =  68     ! 0x44
+contains
 
-    private :: nearest_cell, &
-               nearest_vertex, &
-               sphere_distance, &
-               mpas_arc_length, &
-               mpas_triangle_signed_area_sphere, &
-               mpas_wachspress_coordinates, &
-               convert_lx, &
-               index2d
+   integer function remap_info_setup(src_mesh, dst_mesh, remap_info) result(stat)
 
+      implicit none
 
-    contains
+      type(mpas_mesh_type), intent(in), target :: src_mesh
+      type(target_mesh_type), intent(in), target :: dst_mesh
+      type(remap_info_type), intent(out) :: remap_info
 
+      integer :: idx, last_idx
+      integer :: j
+      integer :: nn
+      integer :: ix, iy
+      integer :: irank
+      real, dimension(:, :), allocatable :: vertCoords
+      real, dimension(3) :: pointInterp
 
-    integer function remap_info_setup(src_mesh, dst_mesh, remap_info) result(stat)
+      stat = 0
 
-        implicit none
+      remap_info%method = 1
+      remap_info%src_mesh => src_mesh
+      remap_info%dst_mesh => dst_mesh
 
-        type (mpas_mesh_type), intent(in), target :: src_mesh
-        type (target_mesh_type), intent(in), target :: dst_mesh
-        type (remap_info_type), intent(out) :: remap_info
+      !
+      ! For nearest neighbor
+      !
+      allocate (remap_info%nearestCell(dst_mesh%nlon, dst_mesh%nlat))
+      allocate (remap_info%nearestVertex(dst_mesh%nlon, dst_mesh%nlat))
+      allocate (remap_info%nearestEdge(dst_mesh%nlon, dst_mesh%nlat))
 
-        integer :: idx, last_idx
-        integer :: j
-        integer :: nn
-        integer :: ix, iy
-        integer :: irank
-        real, dimension(:,:), allocatable :: vertCoords
-        real, dimension(3) :: pointInterp
+      irank = dst_mesh%irank
 
-        stat = 0
-
-        remap_info % method = 1
-        remap_info % src_mesh => src_mesh
-        remap_info % dst_mesh => dst_mesh
-
-        !
-        ! For nearest neighbor
-        !
-        allocate(remap_info % nearestCell(dst_mesh % nlon, dst_mesh % nlat))
-        allocate(remap_info % nearestVertex(dst_mesh % nlon, dst_mesh % nlat))
-        allocate(remap_info % nearestEdge(dst_mesh % nlon, dst_mesh % nlat))
-
-        irank = dst_mesh % irank
-
-        last_idx = interior_element(src_mesh % cellsOnCell, nNeighbors = src_mesh % nEdgesOnCell)
-        do iy=1,dst_mesh % nlat
-        do ix=1,dst_mesh % nlon
-            idx = nearest_cell(dst_mesh % lats(index2d(irank,ix),iy), dst_mesh % lons(ix,index2d(irank,iy)), last_idx, &
-                               src_mesh % nCells, src_mesh % maxEdges, &
-                               src_mesh % nEdgesOnCell, src_mesh % cellsOnCell, src_mesh % latCell, src_mesh % lonCell)
+      last_idx = interior_element(src_mesh%cellsOnCell, nNeighbors=src_mesh%nEdgesOnCell)
+      do iy = 1, dst_mesh%nlat
+         do ix = 1, dst_mesh%nlon
+            idx = nearest_cell(dst_mesh%lats(index2d(irank, ix), iy), dst_mesh%lons(ix, index2d(irank, iy)), last_idx &
+                            , src_mesh%nCells, src_mesh%maxEdges, src_mesh%nEdgesOnCell, src_mesh% &
+                            , src_mesh%latCell, src_mesh%lonCell)
             if (idx <= 0) then
-                remap_info % nearestCell(ix, iy) = 0
+               remap_info%nearestCell(ix, iy) = 0
             else
-                remap_info % nearestCell(ix, iy) = idx
-                last_idx = idx
+               remap_info%nearestCell(ix, iy) = idx
+               last_idx = idx
             end if
-        end do
-        end do
+         end do
+      end do
 
-        last_idx = interior_element(src_mesh % cellsOnVertex, nNeighborsConstant = 3)
-        do iy=1,dst_mesh % nlat
-        do ix=1,dst_mesh % nlon
-            idx = nearest_vertex(dst_mesh % lats(index2d(irank,ix),iy), dst_mesh % lons(ix,index2d(irank,iy)), last_idx, &
-                                 src_mesh % nCells, src_mesh % nVertices, src_mesh % maxEdges, 3, &
-                                 src_mesh % nEdgesOnCell, src_mesh % verticesOnCell, &
-                                 src_mesh % cellsOnVertex, src_mesh % latCell, src_mesh % lonCell, &
-                                 src_mesh % latVertex, src_mesh % lonVertex )
+      last_idx = interior_element(src_mesh%cellsOnVertex, nNeighborsConstant=3)
+      do iy = 1, dst_mesh%nlat
+         do ix = 1, dst_mesh%nlon
+            idx = nearest_vertex(dst_mesh%lats(index2d(irank, ix), iy), dst_mesh%lons(ix, index2d(irank, iy)), last_idx &
+                              , src_mesh%nCells, src_mesh%nVertices, src_mesh%maxEdges, 3, src_mesh%nEdgesOnCell &
+                              , src_mesh%verticesOnCell, src_mesh%cellsOnVertex, src_mesh%latCell, src_mesh%lonCell &
+                              , src_mesh%latVertex, src_mesh%lonVertex)
             if (idx <= 0) then
-                remap_info % nearestVertex(ix, iy) = 0
+               remap_info%nearestVertex(ix, iy) = 0
             else
-                remap_info % nearestVertex(ix, iy) = idx
-                last_idx = idx
+               remap_info%nearestVertex(ix, iy) = idx
+               last_idx = idx
             end if
-        end do
-        end do
+         end do
+      end do
 
-        last_idx = interior_element(src_mesh % cellsOnEdge, nNeighborsConstant = 2)
-        do iy=1,dst_mesh % nlat
-        do ix=1,dst_mesh % nlon
-            idx = nearest_vertex(dst_mesh % lats(index2d(irank,ix),iy), dst_mesh % lons(ix,index2d(irank,iy)), last_idx, &
-                                 src_mesh % nCells, src_mesh % nEdges, src_mesh % maxEdges, 2, &
-                                 src_mesh % nEdgesOnCell, src_mesh % edgesOnCell, &
-                                 src_mesh % cellsOnEdge, src_mesh % latCell, src_mesh % lonCell, &
-                                 src_mesh % latEdge, src_mesh % lonEdge )
+      last_idx = interior_element(src_mesh%cellsOnEdge, nNeighborsConstant=2)
+      do iy = 1, dst_mesh%nlat
+         do ix = 1, dst_mesh%nlon
+            idx = nearest_vertex(dst_mesh%lats(index2d(irank, ix), iy), dst_mesh%lons(ix, index2d(irank, iy)), last_idx &
+                              , src_mesh%nCells, src_mesh%nEdges, src_mesh%maxEdges, 2, src_mesh%nEdgesOnCell &
+                              , src_mesh%edgesOnCell, src_mesh%cellsOnEdge, src_mesh%latCell, src_mesh%lonCell &
+                              , src_mesh%latEdge, src_mesh%lonEdge)
             if (idx <= 0) then
-                remap_info % nearestEdge(ix, iy) = 0
+               remap_info%nearestEdge(ix, iy) = 0
             else
-                remap_info % nearestEdge(ix, iy) = idx
-                last_idx = idx
+               remap_info%nearestEdge(ix, iy) = idx
+               last_idx = idx
             end if
-        end do
-        end do
+         end do
+      end do
 
+      !
+      ! For Wachspress interpolation
+      !
+      allocate (vertCoords(3, 3))
 
-        !
-        ! For Wachspress interpolation
-        !
-        allocate(vertCoords(3,3))
+      allocate (remap_info%cellWeights(3, dst_mesh%nlon, dst_mesh%nlat))
+      allocate (remap_info%sourceCells(3, dst_mesh%nlon, dst_mesh%nlat))
 
-        allocate(remap_info % cellWeights(3, dst_mesh % nlon, dst_mesh % nlat))
-        allocate(remap_info % sourceCells(3, dst_mesh % nlon, dst_mesh % nlat))
-
-        last_idx = interior_element(src_mesh % cellsOnCell, nNeighbors = src_mesh % nEdgesOnCell)
-        do iy=1,dst_mesh % nlat
-        do ix=1,dst_mesh % nlon
-            idx = nearest_vertex(dst_mesh % lats(index2d(irank,ix),iy), dst_mesh % lons(ix,index2d(irank,iy)), last_idx, &
-                                 src_mesh % nCells, src_mesh % nVertices, src_mesh % maxEdges, 3, &
-                                 src_mesh % nEdgesOnCell, src_mesh % verticesOnCell, &
-                                 src_mesh % cellsOnVertex, src_mesh % latCell, src_mesh % lonCell, &
-                                 src_mesh % latVertex, src_mesh % lonVertex )
+      last_idx = interior_element(src_mesh%cellsOnCell, nNeighbors=src_mesh%nEdgesOnCell)
+      do iy = 1, dst_mesh%nlat
+         do ix = 1, dst_mesh%nlon
+            idx = nearest_vertex(dst_mesh%lats(index2d(irank, ix), iy), dst_mesh%lons(ix, index2d(irank, iy)), last_idx &
+                              , src_mesh%nCells, src_mesh%nVertices, src_mesh%maxEdges, 3, src_mesh% &
+                              , src_mesh%verticesOnCell,src_mesh%cellsOnVertex, src_mesh%latCell, src_mesh%lonCell &
+                              , src_mesh%latVertex, src_mesh%lonVertex)
 
             if (idx <= 0) then
-                remap_info % sourceCells(:,ix,iy) = 1
-                remap_info % cellWeights(:,ix,iy) = 0.0
+               remap_info%sourceCells(:, ix, iy) = 1
+               remap_info%cellWeights(:, ix, iy) = 0.0
             else
-                remap_info % sourceCells(:,ix,iy) = src_mesh % cellsOnVertex(:,idx)
-                pointInterp(:) = convert_lx(dst_mesh % lats(index2d(irank,ix),iy), dst_mesh % lons(ix,index2d(irank,iy)), 6371229.0)
-                do j=1,3
-                    vertCoords(:,j) = convert_lx(src_mesh % latCell(src_mesh % cellsOnVertex(j,idx)), &
-                                                 src_mesh % lonCell(src_mesh % cellsOnVertex(j,idx)), &
-                                                 6371229.0)
-                end do
-                remap_info % cellWeights(:,ix,iy) = mpas_wachspress_coordinates(3, vertCoords, pointInterp)
-                last_idx = idx
+               remap_info%sourceCells(:, ix, iy) = src_mesh%cellsOnVertex(:, idx)
+               pointInterp(:) = convert_lx(dst_mesh%lats(index2d(irank, ix), iy), dst_mesh%lons(ix, index2d(irank, iy)), 6371229.0)
+               do j = 1, 3
+                  vertCoords(:, j) = convert_lx(src_mesh%latCell(src_mesh%cellsOnVertex(j, idx)), &
+                                             src_mesh%lonCell(src_mesh%cellsOnVertex(j, idx)), &
+                                             6371229.0)
+               end do
+               remap_info%cellWeights(:, ix, iy) = mpas_wachspress_coordinates(3, vertCoords, pointInterp)
+               last_idx = idx
             end if
-        end do
-        end do
+         end do
+      end do
 
-        deallocate(vertCoords)
+      deallocate (vertCoords)
 
+      allocate (vertCoords(3, src_mesh%maxEdges))
 
-        allocate(vertCoords(3,src_mesh % maxEdges))
+      allocate (remap_info%vertexWeights(src_mesh%maxEdges, dst_mesh%nlon, dst_mesh%nlat))
+      allocate (remap_info%sourceVertices(src_mesh%maxEdges, dst_mesh%nlon, dst_mesh%nlat))
 
-        allocate(remap_info % vertexWeights(src_mesh % maxEdges, dst_mesh % nlon, dst_mesh % nlat))
-        allocate(remap_info % sourceVertices(src_mesh % maxEdges, dst_mesh % nlon, dst_mesh % nlat))
-
-        last_idx = interior_element(src_mesh % cellsOnVertex, nNeighborsConstant = 3)
-        do iy=1,dst_mesh % nlat
-        do ix=1,dst_mesh % nlon
-            idx = nearest_cell(dst_mesh % lats(index2d(irank,ix),iy), dst_mesh % lons(ix,index2d(irank,iy)), last_idx, &
-                               src_mesh % nCells, src_mesh % maxEdges, &
-                               src_mesh % nEdgesOnCell, src_mesh % cellsOnCell, src_mesh % latCell, src_mesh % lonCell)
+      last_idx = interior_element(src_mesh%cellsOnVertex, nNeighborsConstant=3)
+      do iy = 1, dst_mesh%nlat
+         do ix = 1, dst_mesh%nlon
+            idx = nearest_cell(dst_mesh%lats(index2d(irank, ix), iy), dst_mesh%lons(ix, index2d(irank, iy)), last_idx, &
+                            src_mesh%nCells, src_mesh%maxEdges, src_mesh%nEdgesOnCell, src_mesh%cellsOnCell &
+                            , src_mesh%latCell, src_mesh%lonCell)
             if (idx <= 0) then
-                remap_info % sourceVertices(:,ix,iy) = 1
-                remap_info % vertexWeights(:,ix,iy) = 0.0
-                idx = 1
+               remap_info%sourceVertices(:, ix, iy) = 1
+               remap_info%vertexWeights(:, ix, iy) = 0.0
+               idx = 1
             else
-                nn = src_mesh % nEdgesOnCell(idx)
-                remap_info % sourceVertices(:,ix,iy) = 1
-                remap_info % sourceVertices(1:nn,ix,iy) = src_mesh % verticesOnCell(1:nn,idx)
-                pointInterp(:) = convert_lx(dst_mesh % lats(index2d(irank,ix),iy), dst_mesh % lons(ix,index2d(irank,iy)), 6371229.0)
-                do j=1,nn
-                    vertCoords(:,j) = convert_lx(src_mesh % latVertex(src_mesh % verticesOnCell(j,idx)), &
-                                                 src_mesh % lonVertex(src_mesh % verticesOnCell(j,idx)), &
-                                                 6371229.0)
-                end do
-                remap_info % vertexWeights(:,ix,iy) = 0.0
-                remap_info % vertexWeights(1:nn,ix,iy) = mpas_wachspress_coordinates(nn, vertCoords(:,1:nn), pointInterp)
-                last_idx = idx
+               nn = src_mesh%nEdgesOnCell(idx)
+               remap_info%sourceVertices(:, ix, iy) = 1
+               remap_info%sourceVertices(1:nn, ix, iy) = src_mesh%verticesOnCell(1:nn, idx)
+               pointInterp(:) = convert_lx(dst_mesh%lats(index2d(irank, ix), iy), dst_mesh%lons(ix, index2d(irank, iy)), 6371229.0)
+               do j = 1, nn
+                  vertCoords(:, j) = convert_lx(src_mesh%latVertex(src_mesh%verticesOnCell(j, idx)), &
+                                             src_mesh%lonVertex(src_mesh%verticesOnCell(j, idx)), &
+                                             6371229.0)
+               end do
+               remap_info%vertexWeights(:, ix, iy) = 0.0
+               remap_info%vertexWeights(1:nn, ix, iy) = mpas_wachspress_coordinates(nn, vertCoords(:, 1:nn), pointInterp)
+               last_idx = idx
             end if
-        end do
-        end do
+         end do
+      end do
 
-        deallocate(vertCoords)
+      deallocate (vertCoords)
 
+      allocate (vertCoords(3, src_mesh%maxEdges))
 
-        allocate(vertCoords(3,src_mesh % maxEdges))
+      allocate (remap_info%edgeWeights(src_mesh%maxEdges, dst_mesh%nlon, dst_mesh%nlat))
+      allocate (remap_info%sourceEdges(src_mesh%maxEdges, dst_mesh%nlon, dst_mesh%nlat))
 
-        allocate(remap_info % edgeWeights(src_mesh % maxEdges, dst_mesh % nlon, dst_mesh % nlat))
-        allocate(remap_info % sourceEdges(src_mesh % maxEdges, dst_mesh % nlon, dst_mesh % nlat))
-
-        last_idx = interior_element(src_mesh % cellsOnEdge, nNeighborsConstant = 2)
-        do iy=1,dst_mesh % nlat
-        do ix=1,dst_mesh % nlon
-            idx = nearest_cell(dst_mesh % lats(index2d(irank,ix),iy), dst_mesh % lons(ix,index2d(irank,iy)), last_idx, &
-                               src_mesh % nCells, src_mesh % maxEdges, &
-                               src_mesh % nEdgesOnCell, src_mesh % cellsOnCell, src_mesh % latCell, src_mesh % lonCell)
+      last_idx = interior_element(src_mesh%cellsOnEdge, nNeighborsConstant=2)
+      do iy = 1, dst_mesh%nlat
+         do ix = 1, dst_mesh%nlon
+            idx = nearest_cell(dst_mesh%lats(index2d(irank, ix), iy), dst_mesh%lons(ix, index2d(irank, iy)), last_idx, &
+                            src_mesh%nCells, src_mesh%maxEdges, &
+                            src_mesh%nEdgesOnCell, src_mesh%cellsOnCell, src_mesh%latCell, src_mesh%lonCell)
             if (idx <= 0) then
-                remap_info % sourceEdges(:,ix,iy) = 1
-                remap_info % edgeWeights(:,ix,iy) = 0.0
-                idx = 1
+               remap_info%sourceEdges(:, ix, iy) = 1
+               remap_info%edgeWeights(:, ix, iy) = 0.0
+               idx = 1
             else
-                nn = src_mesh % nEdgesOnCell(idx)
-                remap_info % sourceEdges(:,ix,iy) = 1
-                remap_info % sourceEdges(1:nn,ix,iy) = src_mesh % edgesOnCell(1:nn,idx)
-                pointInterp(:) = convert_lx(dst_mesh % lats(index2d(irank,ix),iy), dst_mesh % lons(ix,index2d(irank,iy)), 6371229.0)
-                do j=1,nn
-                    vertCoords(:,j) = convert_lx(src_mesh % latEdge(src_mesh % edgesOnCell(j,idx)), &
-                                                 src_mesh % lonEdge(src_mesh % edgesOnCell(j,idx)), &
-                                                 6371229.0)
-                end do
-                remap_info % edgeWeights(:,ix,iy) = 0.0
-                remap_info % edgeWeights(1:nn,ix,iy) = mpas_wachspress_coordinates(nn, vertCoords(:,1:nn), pointInterp)
-                last_idx = idx
+               nn = src_mesh%nEdgesOnCell(idx)
+               remap_info%sourceEdges(:, ix, iy) = 1
+               %sourceEdges(1:nn, ix, iy) = src_mesh%edgesOnCell(1:nn, idx)
+               pointInterp(:) = convert_lx(dst_mesh%lats(index2d(irank, ix), iy), dst_mesh%lons(ix, index2d(irank, iy)), 6371229.0)
+               do j = 1, nn
+                  vertCoords(:, j) = convert_lx(src_mesh%latEdge(src_mesh%edgesOnCell(j, idx)), &
+                                             src_mesh%lonEdge(src_mesh%edgesOnCell(j, idx)), &
+                                             6371229.0)
+               end do
+               remap_info%edgeWeights(:, ix, iy) = 0.0
+               remap_info%edgeWeights(1:nn, ix, iy) = mpas_wachspress_coordinates(nn, vertCoords(:, 1:nn), pointInterp)
+               last_idx = idx
             end if
-        end do
-        end do
+         end do
+      end do
 
-        deallocate(vertCoords)
+      deallocate (vertCoords)
 
-    end function remap_info_setup
+   end function remap_info_setup
 
+   integer function remap_info_free(remap_info) result(stat)
 
-    integer function remap_info_free(remap_info) result(stat)
+      implicit none
 
-        implicit none
+      type(remap_info_type), intent(inout) :: remap_info
 
-        type (remap_info_type), intent(inout) :: remap_info
+      stat = 0
 
+      remap_info%method = -1
+      nullify (remap_info%src_mesh)
+      nullify (remap_info%dst_mesh)
 
-        stat = 0
+      if (associated(remap_info%nearestCell)) then
+         deallocate (remap_info%nearestCell)
+      end if
+      if (associated(remap_info%nearestVertex)) then
+         deallocate (remap_info%nearestVertex)
+      end if
+      if (associated(remap_info%nearestEdge)) then
+         deallocate (remap_info%nearestEdge)
+      end if
+      if (associated(remap_info%cellWeights)) then
+         deallocate (remap_info%cellWeights)
+      end if
+      if (associated(remap_info%vertexWeights)) then
+         deallocate (remap_info%vertexWeights)
+      end if
+      if (associated(remap_info%edgeWeights)) then
+         deallocate (remap_info%edgeWeights)
+      end if
+      if (associated(remap_info%sourceCells)) then
+         deallocate (remap_info%sourceCells)
+      end if
+      if (associated(remap_info%sourceVertices)) then
+         deallocate (remap_info%sourceVertices)
+      end if
+      if (associated(remap_info%sourceEdges)) then
+         deallocate (remap_info%sourceEdges)
+      end if
 
-        remap_info % method = -1
-        nullify(remap_info % src_mesh)
-        nullify(remap_info % dst_mesh)
+   end function remap_info_free
 
-        if (associated(remap_info % nearestCell)) then
-            deallocate(remap_info % nearestCell)
-        end if
-        if (associated(remap_info % nearestVertex)) then
-            deallocate(remap_info % nearestVertex)
-        end if
-        if (associated(remap_info % nearestEdge)) then
-            deallocate(remap_info % nearestEdge)
-        end if
-        if (associated(remap_info % cellWeights)) then
-            deallocate(remap_info % cellWeights)
-        end if
-        if (associated(remap_info % vertexWeights)) then
-            deallocate(remap_info % vertexWeights)
-        end if
-        if (associated(remap_info % edgeWeights)) then
-            deallocate(remap_info % edgeWeights)
-        end if
-        if (associated(remap_info % sourceCells)) then
-            deallocate(remap_info % sourceCells)
-        end if
-        if (associated(remap_info % sourceVertices)) then
-            deallocate(remap_info % sourceVertices)
-        end if
-        if (associated(remap_info % sourceEdges)) then
-            deallocate(remap_info % sourceEdges)
-        end if
+   logical function can_remap_field(field)
 
-    end function remap_info_free
+      implicit none
 
+      type(input_field_type), intent(in) :: field
 
-    logical function can_remap_field(field)
+      integer :: fld_class
 
-        implicit none
+      can_remap_field = .true.
 
-        type (input_field_type), intent(in) :: field
+      ! Check type of field
+      if (field%xtype /= FIELD_TYPE_INTEGER .and. &
+          field%xtype /= FIELD_TYPE_REAL .and. &
+          field%xtype /= FIELD_TYPE_DOUBLE) then
+         can_remap_field = .false.
+         return
+      end if
 
-        integer :: fld_class
+      ! Check dimensionality of field
+      if (field%ndims == 0 .or. &
+          (field%ndims == 1 .and. field%isTimeDependent)) then
+         can_remap_field = .false.
+         return
+      end if
 
+      ! Check ordering of dimensions
+      fld_class = field_class(field%dimnames)
 
-        can_remap_field = .true.
+      if (iand(fld_class, MPAS_MASK) == 0 .and. iand(fld_class, CAM_MASK) == 0) then
+         can_remap_field = .false.
+         return
+      end if
 
-        ! Check type of field
-        if (field % xtype /= FIELD_TYPE_INTEGER .and. &
-            field % xtype /= FIELD_TYPE_REAL .and. &
-            field % xtype /= FIELD_TYPE_DOUBLE) then
-            can_remap_field = .false.
-            return
-        end if
+   end function can_remap_field
 
-        ! Check dimensionality of field
-        if (field % ndims == 0 .or. &
-            (field % ndims == 1 .and. field % isTimeDependent)) then
-            can_remap_field = .false.
-            return
-        end if
+   integer function remap_field_dryrun(nVertLevels, nOznLevels, nSoilLevels, &
+                                       remap_info, src_field, dst_field) result(stat)
 
-        ! Check ordering of dimensions
-        fld_class = field_class(field % dimnames)
+      implicit none
+      integer, intent(in) :: nVertLevels, nOznLevels, nSoilLevels
+      type(remap_info_type), intent(in) :: remap_info
+      type(input_field_type), intent(in) :: src_field
+      type(target_field_type), intent(out) :: dst_field
 
-        if (iand(fld_class, MPAS_MASK) == 0 .and. iand(fld_class, CAM_MASK) == 0) then
-            can_remap_field = .false.
-            return
-        end if
+      integer :: idim
+      integer :: fld_class
 
-    end function can_remap_field
+      stat = 0
 
+      fld_class = field_class(src_field%dimnames)
 
-    integer function remap_field_dryrun(nVertLevels,nOznLevels,nSoilLevels,&
-                          remap_info, src_field, dst_field) result(stat)
+      dst_field%name = src_field%name
+      dst_field%xtype = src_field%xtype
+      if (src_field%isTimeDependent) then
+         ! Single horizontal dimension becomes two horizontal dimensions, nlat and nlon,
+         ! but the time dimension is not counted in the target field
+         dst_field%ndims = src_field%ndims
+      else
+         ! Single horizontal dimension becomes two horizontal dimensions, nlat and nlon
+         dst_field%ndims = src_field%ndims + 1
+      end if
+      allocate (dst_field%dimnames(dst_field%ndims))
+      allocate (dst_field%dimlens(dst_field%ndims))
+      dst_field%isTimeDependent = src_field%isTimeDependent
 
-        implicit none
-        integer, intent(in   ) :: nVertLevels,nOznLevels,nSoilLevels
-        type (remap_info_type), intent(in) :: remap_info
-        type (input_field_type), intent(in) :: src_field
-        type (target_field_type), intent(out) :: dst_field
+      dst_field%dimlens(1) = remap_info%dst_mesh%nlon
+      dst_field%dimnames(1) = 'longitude'
+      dst_field%dimlens(2) = remap_info%dst_mesh%nlat
+      dst_field%dimnames(2) = 'latitude'
 
-        integer :: idim
-        integer :: fld_class
+      ! Based on ordering of dimensions in source field, set dimension names
+      ! in the destination field
+      if (iand(fld_class, MPAS_MASK) > 0) then
+         do idim = 1, dst_field%ndims - 2
+            if (src_field%dimnames(idim) == 'u_iso_levels') then
+               dst_field%dimlens(2 + idim) = src_field%dimlens(idim)
+               dst_field%dimnames(2 + idim) = 'level'
+            else if (src_field%dimnames(idim) == 't_iso_levels') then
+               dst_field%dimlens(2 + idim) = src_field%dimlens(idim)
+               dst_field%dimnames(2 + idim) = 'level'
+            else if (src_field%dimnames(idim) == 'z_iso_levels') then
+               dst_field%dimlens(2 + idim) = src_field%dimlens(idim)
+               dst_field%dimnames(2 + idim) = 'level'
+            else if (src_field%dimnames(idim) == 'nVertLevels') then
+               dst_field%dimlens(2 + idim) = nVertLevels
+               dst_field%dimnames(2 + idim) = 'level'
+            else if (src_field%dimnames(idim) == 'nVertLevelsP1') then
+               dst_field%dimlens(2 + idim) = nVertLevels + 1
+               dst_field%dimnames(2 + idim) = 'level'
+            else if (src_field%dimnames(idim) == 'nOznLevels') then
+               dst_field%dimlens(2 + idim) = nOznLevels
+               dst_field%dimnames(2 + idim) = 'level'
+            else if (src_field%dimnames(idim) == 'nSoilLevels') then
+               dst_field%dimlens(2 + idim) = nSoilLevels
+               dst_field%dimnames(2 + idim) = 'level'
+            else
+               dst_field%dimlens(2 + idim) = src_field%dimlens(idim)
+               dst_field%dimnames(2 + idim) = src_field%dimnames(idim)
+            end if
+         end do
+      else if (iand(fld_class, CAM_MASK) > 0) then
+         do idim = 2, dst_field%ndims - 1
+            if (src_field%dimnames(idim) == 'u_iso_levels') then
+               dst_field%dimlens(idim + 1) = src_field%dimlens(idim)
+               dst_field%dimnames(idim + 1) = 'level'
+            else if (src_field%dimnames(idim) == 't_iso_levels') then
+               dst_field%dimlens(idim + 1) = src_field%dimlens(idim)
+               dst_field%dimnames(idim + 1) = 'level'
+            else if (src_field%dimnames(idim) == 'z_iso_levels') then
+               dst_field%dimlens(idim + 1) = src_field%dimlens(idim)
+               dst_field%dimnames(idim + 1) = 'level'
+            else if (src_field%dimnames(idim) == 'nVertLevels') then
+               dst_field%dimlens(idim + 1) = nVertLevels
+               dst_field%dimnames(idim + 1) = 'level'
+            else if (src_field%dimnames(idim) == 'nVertLevelsP1') then
+               dst_field%dimlens(idim + 1) = nVertLevels + 1
+               dst_field%dimnames(idim + 1) = 'level'
+            else if (src_field%dimnames(idim) == 'nOznLevels') then
+               dst_field%dimlens(idim + 1) = nOznLevels
+               dst_field%dimnames(idim + 1) = 'level'
+            else if (src_field%dimnames(idim) == 'nSoilLevels') then
+               dst_field%dimlens(idim + 1) = nSoilLevels
+               dst_field%dimnames(idim + 1) = 'level'
+            else
+               dst_field%dimlens(idim + 1) = src_field%dimlens(idim)
+               dst_field%dimnames(idim + 1) = src_field%dimnames(idim)
+            end if
+         end do
+      else
+         write (0, *) 'Remap dryrun exception: unhandled field class'
+         stat = 1
+      end if
 
-        stat = 0
+   end function remap_field_dryrun
 
-        fld_class = field_class(src_field % dimnames)
+   integer function remap_field(remap_info, src_field, dst_field) result(stat)
 
-        dst_field % name = src_field % name
-        dst_field % xtype = src_field % xtype
-        if (src_field % isTimeDependent) then
-            ! Single horizontal dimension becomes two horizontal dimensions, nlat and nlon,
-            ! but the time dimension is not counted in the target field
-            dst_field % ndims = src_field % ndims
-        else
-            ! Single horizontal dimension becomes two horizontal dimensions, nlat and nlon
-            dst_field % ndims = src_field % ndims + 1
-        end if
-        allocate(dst_field % dimnames(dst_field % ndims))
-        allocate(dst_field % dimlens(dst_field % ndims))
-        dst_field % isTimeDependent = src_field % isTimeDependent
+      implicit none
 
-        dst_field % dimlens(1) = remap_info % dst_mesh % nlon
-        dst_field % dimnames(1) = 'longitude'
-        dst_field % dimlens(2) = remap_info % dst_mesh % nlat
-        dst_field % dimnames(2) = 'latitude'
- 
-        ! Based on ordering of dimensions in source field, set dimension names
-        ! in the destination field
-        if (iand(fld_class, MPAS_MASK) > 0) then
-            do idim=1,dst_field % ndims-2
-               If(src_field % dimnames(idim) == 'u_iso_levels')then
-                dst_field % dimlens(2+idim) = src_field % dimlens(idim)
-                dst_field % dimnames(2+idim) = 'level'
-               else If(src_field % dimnames(idim) == 't_iso_levels')then
-                dst_field % dimlens(2+idim) = src_field % dimlens(idim)
-                dst_field % dimnames(2+idim) = 'level'
-               else If(src_field % dimnames(idim) == 'z_iso_levels')then
-                dst_field % dimlens(2+idim) = src_field % dimlens(idim)
-                dst_field % dimnames(2+idim) = 'level'
-               else If(src_field % dimnames(idim) == 'nVertLevels')then
-                dst_field % dimlens(2+idim) = nVertLevels
-                dst_field % dimnames(2+idim) = 'level'
-               else If(src_field % dimnames(idim) == 'nVertLevelsP1')then
-                  dst_field % dimlens(2+idim)  = nVertLevels+1
-                  dst_field % dimnames(2+idim) = 'level'
-               else If(src_field % dimnames(idim) == 'nOznLevels')then
-                  dst_field % dimlens(2+idim)  = nOznLevels
-                  dst_field % dimnames(2+idim) = 'level'
-               else If(src_field % dimnames(idim) == 'nSoilLevels')then
-                  dst_field % dimlens(2+idim)  = nSoilLevels
-                  dst_field % dimnames(2+idim) = 'level'
-               else
-                dst_field % dimlens(2+idim) = src_field % dimlens(idim)
-                dst_field % dimnames(2+idim) = src_field % dimnames(idim)
-               end if 
-            end do
-        else if (iand(fld_class, CAM_MASK) > 0) then
-            do idim=2,dst_field % ndims-1
-               If(src_field % dimnames(idim) == 'u_iso_levels')then
-                  dst_field % dimlens(idim+1) = src_field % dimlens(idim)
-                  dst_field % dimnames(idim+1) = 'level'
-               else If(src_field % dimnames(idim) == 't_iso_levels')then
-                  dst_field % dimlens(idim+1) = src_field % dimlens(idim)
-                  dst_field % dimnames(idim+1) = 'level'
-               else If(src_field % dimnames(idim) == 'z_iso_levels')then
-                  dst_field % dimlens(idim+1)  = src_field % dimlens(idim)
-                  dst_field % dimnames(idim+1) = 'level'
-               else If(src_field % dimnames(idim) == 'nVertLevels')then
-                  dst_field % dimlens(idim+1)  = nVertLevels
-                  dst_field % dimnames(idim+1) = 'level'
-               else If(src_field % dimnames(idim) == 'nVertLevelsP1')then
-                  dst_field % dimlens(idim+1)  = nVertLevels+1
-                  dst_field % dimnames(idim+1) = 'level'
-               else If(src_field % dimnames(idim) == 'nOznLevels')then
-                  dst_field % dimlens(idim+1)  = nOznLevels
-                  dst_field % dimnames(idim+1) = 'level'
-               else If(src_field % dimnames(idim) == 'nSoilLevels')then
-                  dst_field % dimlens(idim+1)  = nSoilLevels
-                  dst_field % dimnames(idim+1) = 'level'
-               else
-                  dst_field % dimlens(idim+1)  = src_field % dimlens(idim)
-                  dst_field % dimnames(idim+1) = src_field % dimnames(idim)
-               endif
-            end do
-        else
-            write(0,*) 'Remap dryrun exception: unhandled field class'
-            stat = 1
-        end if
+      type(remap_info_type), intent(in) :: remap_info
+      type(input_field_type), intent(in) :: src_field
+      type(target_field_type), intent(out) :: dst_field
 
-    end function remap_field_dryrun
+      integer :: idim
+      integer :: j
+      integer :: iy, ix
+      integer, dimension(:, :), pointer :: nearestIndex
+      integer, dimension(:, :, :), pointer :: sourceNodes
+      real, dimension(:, :, :), pointer :: nodeWeights
+      integer :: fld_class
 
+      stat = 0
 
-    integer function remap_field(remap_info, src_field, dst_field) result(stat)
+      fld_class = field_class(src_field%dimnames)
 
-        implicit none
+      ! Based on mesh element type, set remapping weight fields
+      if (iand(fld_class, CELL_MASK) > 0) then
+         nearestIndex => remap_info%nearestCell
+         sourceNodes => remap_info%sourceCells
+         nodeWeights => remap_info%cellWeights
+      else if (iand(fld_class, VTX_MASK) > 0) then
+         nearestIndex => remap_info%nearestVertex
+         sourceNodes => remap_info%sourceVertices
+         nodeWeights => remap_info%vertexWeights
+      else if (iand(fld_class, EDGE_MASK) > 0) then
+         nearestIndex => remap_info%nearestEdge
+         sourceNodes => remap_info%sourceEdges
+         nodeWeights => remap_info%edgeWeights
+      else
+         write (0, *) 'Remap exception: unhandled decomposed dim'
+         stat = 1
+         return
+      end if
 
-        type (remap_info_type), intent(in) :: remap_info
-        type (input_field_type), intent(in) :: src_field
-        type (target_field_type), intent(out) :: dst_field
+      dst_field%name = src_field%name
+      dst_field%xtype = src_field%xtype
+      if (src_field%isTimeDependent) then
+         ! Single horizontal dimension becomes two horizontal dimensions, nlat and nlon,
+         ! but the time dimension is not counted in the target field
+         dst_field%ndims = src_field%ndims
+      else
+         ! Single horizontal dimension becomes two horizontal dimensions, nlat and nlon
+         dst_field%ndims = src_field%ndims + 1
+      end if
+      allocate (dst_field%dimnames(dst_field%ndims))
+      allocate (dst_field%dimlens(dst_field%ndims))
+      dst_field%isTimeDependent = src_field%isTimeDependent
 
-        integer :: idim
-        integer :: j
-        integer :: iy, ix
-        integer, dimension(:,:), pointer :: nearestIndex
-        integer, dimension(:,:,:), pointer :: sourceNodes
-        real, dimension(:,:,:), pointer :: nodeWeights
-        integer :: fld_class
+      dst_field%dimlens(1) = remap_info%dst_mesh%nlon
+      dst_field%dimnames(1) = 'longitude'
+      dst_field%dimlens(2) = remap_info%dst_mesh%nlat
+      dst_field%dimnames(2) = 'latitude'
 
-        stat = 0
+      ! Based on ordering of dimensions in source field, set dimension names
+      ! in the destination field
+      if (iand(fld_class, MPAS_MASK) > 0) then
+         do idim = 1, dst_field%ndims - 2
+            dst_field%dimlens(2 + idim) = src_field%dimlens(idim)
+            dst_field%dimnames(2 + idim) = src_field%dimnames(idim)
+         end do
+      else
+         do idim = 2, dst_field%ndims - 1
+            dst_field%dimlens(idim + 1) = src_field%dimlens(idim)
+            dst_field%dimnames(idim + 1) = src_field%dimnames(idim)
+         end do
+      end if
 
-        fld_class = field_class(src_field % dimnames)
-
-        ! Based on mesh element type, set remapping weight fields
-        if (iand(fld_class, CELL_MASK) > 0) then
-            nearestIndex => remap_info % nearestCell
-            sourceNodes => remap_info % sourceCells
-            nodeWeights => remap_info % cellWeights
-        else if (iand(fld_class, VTX_MASK) > 0) then
-            nearestIndex => remap_info % nearestVertex
-            sourceNodes => remap_info % sourceVertices
-            nodeWeights => remap_info % vertexWeights
-        else if (iand(fld_class, EDGE_MASK) > 0) then
-            nearestIndex => remap_info % nearestEdge
-            sourceNodes => remap_info % sourceEdges
-            nodeWeights => remap_info % edgeWeights
-        else
-            write(0,*) 'Remap exception: unhandled decomposed dim'
-            stat = 1
-            return
-        end if
-
-        dst_field % name = src_field % name
-        dst_field % xtype = src_field % xtype
-        if (src_field % isTimeDependent) then
-            ! Single horizontal dimension becomes two horizontal dimensions, nlat and nlon,
-            ! but the time dimension is not counted in the target field
-            dst_field % ndims = src_field % ndims
-        else
-            ! Single horizontal dimension becomes two horizontal dimensions, nlat and nlon
-            dst_field % ndims = src_field % ndims + 1
-        end if
-        allocate(dst_field % dimnames(dst_field % ndims))
-        allocate(dst_field % dimlens(dst_field % ndims))
-        dst_field % isTimeDependent = src_field % isTimeDependent
-
-        dst_field % dimlens(1) = remap_info % dst_mesh % nlon
-        dst_field % dimnames(1) = 'longitude'
-        dst_field % dimlens(2) = remap_info % dst_mesh % nlat
-        dst_field % dimnames(2) = 'latitude'
-
-        ! Based on ordering of dimensions in source field, set dimension names
-        ! in the destination field
-        if (iand(fld_class, MPAS_MASK) > 0) then
-            do idim=1,dst_field % ndims-2
-                dst_field % dimlens(2+idim) = src_field % dimlens(idim)
-                dst_field % dimnames(2+idim) = src_field % dimnames(idim)
-            end do
-        else
-            do idim=2,dst_field % ndims-1
-                dst_field % dimlens(idim+1) = src_field % dimlens(idim)
-                dst_field % dimnames(idim+1) = src_field % dimnames(idim)
-            end do
-        end if
-
-        if (src_field % xtype == FIELD_TYPE_REAL) then
-            if (dst_field % ndims == 2) then
-                allocate(dst_field % array2r(dst_field % dimlens(1), &
-                                             dst_field % dimlens(2)))
+      if (src_field%xtype == FIELD_TYPE_REAL) then
+         if (dst_field%ndims == 2) then
+            allocate (dst_field%array2r(dst_field%dimlens(1), &
+                                        dst_field%dimlens(2)))
 #ifdef NEAREST_NEIGHBOR
-                do iy=1,size(nearestIndex, dim=2)
-                do ix=1,size(nearestIndex, dim=1)
-                    if (nearestIndex(ix,iy) == 0) then
-                        dst_field % array2r(ix,iy) = NF90_FILL_FLOAT
-                    else
-                        dst_field % array2r(ix,iy) = src_field % array1r(nearestIndex(ix,iy))
-                    end if
-                end do
-                end do
+            do iy = 1, size(nearestIndex, dim=2)
+               do ix = 1, size(nearestIndex, dim=1)
+                  if (nearestIndex(ix, iy) == 0) then
+                     dst_field%array2r(ix, iy) = NF90_FILL_FLOAT
+                  else
+                     %array2r(ix, iy) = src_field%array1r(nearestIndex(ix, iy))
+                  end if
+               end do
+            end do
 #else
-                do iy=1,size(nearestIndex, dim=2)
-                do ix=1,size(nearestIndex, dim=1)
-                    if (sum(nodeWeights(:,ix,iy)) == 0.0) then
-                        dst_field % array2r(ix,iy) = NF90_FILL_FLOAT
-                    else
-                        dst_field % array2r(ix,iy) = 0.0
-                        do j=1,size(sourceNodes, dim=1)
-                            dst_field % array2r(ix,iy) = dst_field % array2r(ix,iy) + &
-                                                          nodeWeights(j,ix,iy) &
-                                                          * src_field % array1r(sourceNodes(j,ix,iy))
+            do iy = 1, size(nearestIndex, dim=2)
+               do ix = 1, size(nearestIndex, dim=1)
+                  if (sum(nodeWeights(:, ix, iy)) == 0.0) then
+                     dst_field%array2r(ix, iy) = NF90_FILL_FLOAT
+                  else
+                     dst_field%array2r(ix, iy) = 0.0
+                     do j = 1, size(sourceNodes, dim=1)
+                        dst_field%array2r(ix, iy) = dst_field%array2r(ix, iy) + &
+                                                 nodeWeights(j, ix, iy) &
+                                                 *src_field%array1r(sourceNodes(j, ix, iy))
+                     end do
+                  end if
+               end do
+            end do
+#endif
+         else if (dst_field%ndims == 3) then
+            allocate (dst_field%array3r(dst_field%dimlens(1), &
+                                        dst_field%dimlens(2), &
+                                        dst_field%dimlens(3)))
+#ifdef NEAREST_NEIGHBOR
+            do iy = 1, size(nearestIndex, dim=2)
+               do ix = 1, size(nearestIndex, dim=1)
+                  if (nearestIndex(ix, iy) == 0) then
+                     dst_field%array3r(ix, iy, :) = NF90_FILL_FLOAT
+                  else
+                     dst_field%array3r(ix, iy, :) = src_field%array2r(:, nearestIndex(ix, iy))
+                  end if
+               end do
+            end do
+#else
+            if (iand(fld_class, MPAS_MASK) > 0) then
+               do iy = 1, size(nearestIndex, dim=2)
+                  do ix = 1, size(nearestIndex, dim=1)
+                     if (sum(nodeWeights(:, ix, iy)) == 0.0) then
+                        dst_field%array3r(ix, iy, :) = NF90_FILL_FLOAT
+                     else
+                        dst_field%array3r(ix, iy, :) = 0.0
+                        do j = 1, size(sourceNodes, dim=1)
+                           dst_field%array3r(ix, iy, :) = dst_field%array3r(ix, iy, :) + &
+                                                       nodeWeights(j, ix, iy) &
+                                                       *src_field%array2r(:, sourceNodes(j, ix, iy))
                         end do
-                    end if
-                end do
-                end do
-#endif
-            else if (dst_field % ndims == 3) then
-                allocate(dst_field % array3r(dst_field % dimlens(1), &
-                                             dst_field % dimlens(2), &
-                                             dst_field % dimlens(3)))
-#ifdef NEAREST_NEIGHBOR
-                do iy=1,size(nearestIndex, dim=2)
-                do ix=1,size(nearestIndex, dim=1)
-                    if (nearestIndex(ix,iy) == 0) then
-                        dst_field % array3r(ix,iy,:) = NF90_FILL_FLOAT
-                    else
-                        dst_field % array3r(ix,iy,:) = src_field % array2r(:,nearestIndex(ix,iy))
-                    end if
-                end do
-                end do
-#else
-                if (iand(fld_class, MPAS_MASK) > 0) then
-                    do iy=1,size(nearestIndex, dim=2)
-                    do ix=1,size(nearestIndex, dim=1)
-                        if (sum(nodeWeights(:,ix,iy)) == 0.0) then
-                            dst_field % array3r(ix,iy,:) = NF90_FILL_FLOAT
-                        else
-                            dst_field % array3r(ix,iy,:) = 0.0
-                            do j=1,size(sourceNodes, dim=1)
-                                dst_field % array3r(ix,iy,:) = dst_field % array3r(ix,iy,:) + &
-                                                                nodeWeights(j,ix,iy) &
-                                                                * src_field % array2r(:,sourceNodes(j,ix,iy))
-                            end do
-                        end if
-                    end do
-                    end do
-                else
-                    do iy=1,size(nearestIndex, dim=2)
-                    do ix=1,size(nearestIndex, dim=1)
-                        if (sum(nodeWeights(:,ix,iy)) == 0.0) then
-                            dst_field % array3r(ix,iy,:) = NF90_FILL_FLOAT
-                        else
-                            dst_field % array3r(ix,iy,:) = 0.0
-                            do j=1,size(sourceNodes, dim=1)
-                                dst_field % array3r(ix,iy,:) = dst_field % array3r(ix,iy,:) + &
-                                                                nodeWeights(j,ix,iy) &
-                                                                * src_field % array2r(sourceNodes(j,ix,iy),:)
-                            end do
-                        end if
-                    end do
-                    end do
-                end if
-#endif
-            else if (dst_field % ndims == 4) then
-                allocate(dst_field % array4r(dst_field % dimlens(1), &
-                                             dst_field % dimlens(2), &
-                                             dst_field % dimlens(3), &
-                                             dst_field % dimlens(4)))
-#ifdef NEAREST_NEIGHBOR
-                do iy=1,size(nearestIndex, dim=2)
-                do ix=1,size(nearestIndex, dim=1)
-                    if (nearestIndex(ix,iy) == 0) then
-                        dst_field % array4r(ix,iy,:,:) = NF90_FILL_FLOAT
-                    else
-                        dst_field % array4r(ix,iy,:,:) = src_field % array3r(:,:,nearestIndex(ix,iy))
-                    end if
-                end do
-                end do
-#else
-                if (iand(fld_class, MPAS_MASK) > 0) then
-                    do iy=1,size(nearestIndex, dim=2)
-                    do ix=1,size(nearestIndex, dim=1)
-                        if (sum(nodeWeights(:,ix,iy)) == 0.0) then
-                            dst_field % array4r(ix,iy,:,:) = NF90_FILL_FLOAT
-                        else
-                            dst_field % array4r(ix,iy,:,:) = 0.0
-                            do j=1,size(sourceNodes, dim=1)
-                                dst_field % array4r(ix,iy,:,:) = dst_field % array4r(ix,iy,:,:) + &
-                                                                  nodeWeights(j,ix,iy) &
-                                                                  * src_field % array3r(:,:,sourceNodes(j,ix,iy))
-                            end do
-                        end if
-                    end do
-                    end do
-                else
-                    do iy=1,size(nearestIndex, dim=2)
-                    do ix=1,size(nearestIndex, dim=1)
-                        if (sum(nodeWeights(:,ix,iy)) == 0.0) then
-                            dst_field % array4r(ix,iy,:,:) = NF90_FILL_FLOAT
-                        else
-                            dst_field % array4r(ix,iy,:,:) = 0.0
-                            do j=1,size(sourceNodes, dim=1)
-                                dst_field % array4r(ix,iy,:,:) = dst_field % array4r(ix,iy,:,:) + &
-                                                                  nodeWeights(j,ix,iy) &
-                                                                  * src_field % array3r(sourceNodes(j,ix,iy),:,:)
-                            end do
-                        end if
-                    end do
-                    end do
-                end if
-#endif
+                     end if
+                  end do
+               end do
             else
-                write(0,*) 'Remap exception: unhandled dimension for real ', dst_field % ndims
-            end if
-        else if (src_field % xtype == FIELD_TYPE_DOUBLE) then
-            if (dst_field % ndims == 2) then
-                allocate(dst_field % array2d(dst_field % dimlens(1), &
-                                             dst_field % dimlens(2)))
-#ifdef NEAREST_NEIGHBOR
-                do iy=1,size(nearestIndex, dim=2)
-                do ix=1,size(nearestIndex, dim=1)
-                    if (nearestIndex(ix,iy) == 0) then
-                        dst_field % array2d(ix,iy) = NF90_FILL_DOUBLE
-                    else
-                        dst_field % array2d(ix,iy) = src_field % array1d(nearestIndex(ix,iy))
-                    end if
-                end do
-                end do
-#else
-                do iy=1,size(nearestIndex, dim=2)
-                do ix=1,size(nearestIndex, dim=1)
-                    if (sum(nodeWeights(:,ix,iy)) == 0.0) then
-                        dst_field % array2d(ix,iy) = NF90_FILL_DOUBLE
-                    else
-                        dst_field % array2d(ix,iy) = 0.0
-                        do j=1,size(sourceNodes, dim=1)
-                            dst_field % array2d(ix,iy) = dst_field % array2d(ix,iy) + &
-                                                          nodeWeights(j,ix,iy) &
-                                                          * src_field % array1d(sourceNodes(j,ix,iy))
+               do iy = 1, size(nearestIndex, dim=2)
+                  do ix = 1, size(nearestIndex, dim=1)
+                     if (sum(nodeWeights(:, ix, iy)) == 0.0) then
+                        dst_field%array3r(ix, iy, :) = NF90_FILL_FLOAT
+                     else
+                        dst_field%array3r(ix, iy, :) = 0.0
+                        do j = 1, size(sourceNodes, dim=1)
+                           dst_field%array3r(ix, iy, :) = dst_field%array3r(ix, iy, :) + &
+                                                       nodeWeights(j, ix, iy) &
+                                                       *src_field%array2r(sourceNodes(j, ix, iy), :)
                         end do
-                    end if
-                end do
-                end do
+                     end if
+                  end do
+               end do
+            end if
 #endif
-            else if (dst_field % ndims == 3) then
-                allocate(dst_field % array3d(dst_field % dimlens(1), &
-                                             dst_field % dimlens(2), &
-                                             dst_field % dimlens(3)))
+         else if (dst_field%ndims == 4) then
+            allocate (dst_field%array4r(dst_field%dimlens(1), &
+                                        dst_field%dimlens(2), &
+                                        dst_field%dimlens(3), &
+                                        dst_field%dimlens(4)))
 #ifdef NEAREST_NEIGHBOR
-                do iy=1,size(nearestIndex, dim=2)
-                do ix=1,size(nearestIndex, dim=1)
-                    if (nearestIndex(ix,iy) == 0) then
-                        dst_field % array3d(ix,iy,:) = NF90_FILL_DOUBLE
-                    else
-                        dst_field % array3d(ix,iy,:) = src_field % array2d(:,nearestIndex(ix,iy))
-                    end if
-                end do
-                end do
+            do iy = 1, size(nearestIndex, dim=2)
+               do ix = 1, size(nearestIndex, dim=1)
+                  if (nearestIndex(ix, iy) == 0) then
+                     dst_field%array4r(ix, iy, :, :) = NF90_FILL_FLOAT
+                  else
+                     dst_field%array4r(ix, iy, :, :) = src_field%array3r(:, :, nearestIndex(ix, iy))
+                  end if
+               end do
+            end do
 #else
-                if (iand(fld_class, MPAS_MASK) > 0) then
-                    do iy=1,size(nearestIndex, dim=2)
-                    do ix=1,size(nearestIndex, dim=1)
-                        if (sum(nodeWeights(:,ix,iy)) == 0.0) then
-                            dst_field % array3d(ix,iy,:) = NF90_FILL_DOUBLE
-                        else
-                            dst_field % array3d(ix,iy,:) = 0.0
-                            do j=1,size(sourceNodes, dim=1)
-                                dst_field % array3d(ix,iy,:) = dst_field % array3d(ix,iy,:) + &
-                                                                nodeWeights(j,ix,iy) &
-                                                                * src_field % array2d(:,sourceNodes(j,ix,iy))
-                            end do
-                        end if
-                    end do
-                    end do
-                else
-                    do iy=1,size(nearestIndex, dim=2)
-                    do ix=1,size(nearestIndex, dim=1)
-                        if (sum(nodeWeights(:,ix,iy)) == 0.0) then
-                            dst_field % array3d(ix,iy,:) = NF90_FILL_DOUBLE
-                        else
-                            dst_field % array3d(ix,iy,:) = 0.0
-                            do j=1,size(sourceNodes, dim=1)
-                                dst_field % array3d(ix,iy,:) = dst_field % array3d(ix,iy,:) + &
-                                                                nodeWeights(j,ix,iy) &
-                                                                * src_field % array2d(sourceNodes(j,ix,iy),:)
-                            end do
-                        end if
-                    end do
-                    end do
-                end if
+            if (iand(fld_class, MPAS_MASK) > 0) then
+               do iy = 1, size(nearestIndex, dim=2)
+                  do ix = 1, size(nearestIndex, dim=1)
+                     if (sum(nodeWeights(:, ix, iy)) == 0.0) then
+                        dst_field%array4r(ix, iy, :, :) = NF90_FILL_FLOAT
+                     else
+                        dst_field%array4r(ix, iy, :, :) = 0.0
+                        do j = 1, size(sourceNodes, dim=1)
+                           dst_field%array4r(ix, iy, :, :) = dst_field%array4r(ix, iy, :, :) + &
+                                                          nodeWeights(j, ix, iy) &
+                                                          *src_field%array3r(:, :, sourceNodes(j, ix, iy))
+                        end do
+                     end if
+                  end do
+               end do
+            else
+               do iy = 1, size(nearestIndex, dim=2)
+                  do ix = 1, size(nearestIndex, dim=1)
+                     if (sum(nodeWeights(:, ix, iy)) == 0.0) then
+                        dst_field%array4r(ix, iy, :, :) = NF90_FILL_FLOAT
+                     else
+                        dst_field%array4r(ix, iy, :, :) = 0.0
+                        do j = 1, size(sourceNodes, dim=1)
+                           dst_field%array4r(ix, iy, :, :) = dst_field%array4r(ix, iy, :, :) + &
+                                                          nodeWeights(j, ix, iy) &
+                                                          *src_field%array3r(sourceNodes(j, ix, iy), :, :)
+                        end do
+                     end if
+                  end do
+               end do
+            end if
 #endif
-            else if (dst_field % ndims == 4) then
-                allocate(dst_field % array4d(dst_field % dimlens(1), &
-                                             dst_field % dimlens(2), &
-                                             dst_field % dimlens(3), &
-                                             dst_field % dimlens(4)))
+         else
+            write (0, *) 'Remap exception: unhandled dimension for real ', dst_field%ndims
+         end if
+      else if (src_field%xtype == FIELD_TYPE_DOUBLE) then
+         if (dst_field%ndims == 2) then
+            allocate (dst_field%array2d(dst_field%dimlens(1), &
+                                        dst_field%dimlens(2)))
 #ifdef NEAREST_NEIGHBOR
-                do iy=1,size(nearestIndex, dim=2)
-                do ix=1,size(nearestIndex, dim=1)
-                    if (nearestIndex(ix,iy) == 0) then
-                        dst_field % array4d(ix,iy,:,:) = NF90_FILL_DOUBLE
-                    else
-                        dst_field % array4d(ix,iy,:,:) = src_field % array3d(:,:,nearestIndex(ix,iy))
-                    end if
-                end do
-                end do
+            do iy = 1, size(nearestIndex, dim=2)
+               do ix = 1, size(nearestIndex, dim=1)
+                  if (nearestIndex(ix, iy) == 0) then
+                     dst_field%array2d(ix, iy) = NF90_FILL_DOUBLE
+                  else
+                     dst_field%array2d(ix, iy) = src_field%array1d(nearestIndex(ix, iy))
+                  end if
+               end do
+            end do
 #else
-                if (iand(fld_class, MPAS_MASK) > 0) then
-                    do iy=1,size(nearestIndex, dim=2)
-                    do ix=1,size(nearestIndex, dim=1)
-                        if (sum(nodeWeights(:,ix,iy)) == 0.0) then
-                            dst_field % array4d(ix,iy,:,:) = NF90_FILL_DOUBLE
-                        else
-                            dst_field % array4d(ix,iy,:,:) = 0.0
-                            do j=1,size(sourceNodes, dim=1)
-                                dst_field % array4d(ix,iy,:,:) = dst_field % array4d(ix,iy,:,:) + &
-                                                                  nodeWeights(j,ix,iy) &
-                                                                  * src_field % array3d(:,:,sourceNodes(j,ix,iy))
-                            end do
-                        end if
-                    end do
-                    end do
-                else
-                    do iy=1,size(nearestIndex, dim=2)
-                    do ix=1,size(nearestIndex, dim=1)
-                        if (sum(nodeWeights(:,ix,iy)) == 0.0) then
-                            dst_field % array4d(ix,iy,:,:) = NF90_FILL_DOUBLE
-                        else
-                            dst_field % array4d(ix,iy,:,:) = 0.0
-                            do j=1,size(sourceNodes, dim=1)
-                                dst_field % array4d(ix,iy,:,:) = dst_field % array4d(ix,iy,:,:) + &
-                                                                  nodeWeights(j,ix,iy) &
-                                                                  * src_field % array3d(sourceNodes(j,ix,iy),:,:)
-                            end do
-                        end if
-                    end do
-                    end do
-                end if
+            do iy = 1, size(nearestIndex, dim=2)
+               do ix = 1, size(nearestIndex, dim=1)
+                  if (sum(nodeWeights(:, ix, iy)) == 0.0) then
+                     dst_field%array2d(ix, iy) = NF90_FILL_DOUBLE
+                  else
+                     dst_field%array2d(ix, iy) = 0.0
+                     do j = 1, size(sourceNodes, dim=1)
+                        dst_field%array2d(ix, iy) = dst_field%array2d(ix, iy) + &
+                                                 nodeWeights(j, ix, iy) &
+                                                 *src_field%array1d(sourceNodes(j, ix, iy))
+                     end do
+                  end if
+               end do
+            end do
 #endif
+         else if (dst_field%ndims == 3) then
+            allocate (dst_field%array3d(dst_field%dimlens(1), &
+                                        dst_field%dimlens(2), &
+                                        dst_field%dimlens(3)))
+#ifdef NEAREST_NEIGHBOR
+            do iy = 1, size(nearestIndex, dim=2)
+               do ix = 1, size(nearestIndex, dim=1)
+                  if (nearestIndex(ix, iy) == 0) then
+                     dst_field%array3d(ix, iy, :) = NF90_FILL_DOUBLE
+                  else
+                     dst_field%array3d(ix, iy, :) = src_field%array2d(:, nearestIndex(ix, iy))
+                  end if
+               end do
+            end do
+#else
+            if (iand(fld_class, MPAS_MASK) > 0) then
+               do iy = 1, size(nearestIndex, dim=2)
+                  do ix = 1, size(nearestIndex, dim=1)
+                     if (sum(nodeWeights(:, ix, iy)) == 0.0) then
+                        dst_field%array3d(ix, iy, :) = NF90_FILL_DOUBLE
+                     else
+                        dst_field%array3d(ix, iy, :) = 0.0
+                        do j = 1, size(sourceNodes, dim=1)
+                           dst_field%array3d(ix, iy, :) = dst_field%array3d(ix, iy, :) + &
+                                                       nodeWeights(j, ix, iy) &
+                                                       *src_field%array2d(:, sourceNodes(j, ix, iy))
+                        end do
+                     end if
+                  end do
+               end do
             else
-                write(0,*) 'Remap exception: unhandled dimension for dbl ', dst_field % ndims
+               do iy = 1, size(nearestIndex, dim=2)
+                  do ix = 1, size(nearestIndex, dim=1)
+                     if (sum(nodeWeights(:, ix, iy)) == 0.0) then
+                        dst_field%array3d(ix, iy, :) = NF90_FILL_DOUBLE
+                     else
+                        dst_field%array3d(ix, iy, :) = 0.0
+                        do j = 1, size(sourceNodes, dim=1)
+                           dst_field%array3d(ix, iy, :) = dst_field%array3d(ix, iy, :) + &
+                                                       nodeWeights(j, ix, iy) &
+                                                       *src_field%array2d(sourceNodes(j, ix, iy), :)
+                        end do
+                     end if
+                  end do
+               end do
             end if
-        else if (src_field % xtype == FIELD_TYPE_INTEGER) then
-            if (dst_field % ndims == 2) then
-                allocate(dst_field % array2i(dst_field % dimlens(1), &
-                                             dst_field % dimlens(2)))
-                do iy=1,size(nearestIndex, dim=2)
-                do ix=1,size(nearestIndex, dim=1)
-                    if (nearestIndex(ix,iy) == 0) then
-                        dst_field % array2i(ix,iy) = NF90_FILL_INT
-                    else
-                        dst_field % array2i(ix,iy) = src_field % array1i(nearestIndex(ix,iy))
-                    end if
-                end do
-                end do
-            else if (dst_field % ndims == 3) then
-                allocate(dst_field % array3i(dst_field % dimlens(1), &
-                                             dst_field % dimlens(2), &
-                                             dst_field % dimlens(3)))
-                if (iand(fld_class, MPAS_MASK) > 0) then
-                    do iy=1,size(nearestIndex, dim=2)
-                    do ix=1,size(nearestIndex, dim=1)
-                        if (nearestIndex(ix,iy) == 0) then
-                            dst_field % array3i(ix,iy,:) = NF90_FILL_INT
-                        else
-                            dst_field % array3i(ix,iy,:) = src_field % array2i(:,nearestIndex(ix,iy))
-                        end if
-                    end do
-                    end do
-                else
-                    do iy=1,size(nearestIndex, dim=2)
-                    do ix=1,size(nearestIndex, dim=1)
-                        if (nearestIndex(ix,iy) == 0) then
-                            dst_field % array3i(ix,iy,:) = NF90_FILL_INT
-                        else
-                            dst_field % array3i(ix,iy,:) = src_field % array2i(nearestIndex(ix,iy),:)
-                        end if
-                    end do
-                    end do
-                end if
-            else if (dst_field % ndims == 4) then
-                allocate(dst_field % array4i(dst_field % dimlens(1), &
-                                             dst_field % dimlens(2), &
-                                             dst_field % dimlens(3), &
-                                             dst_field % dimlens(4)))
-                if (iand(fld_class, MPAS_MASK) > 0) then
-                    do iy=1,size(nearestIndex, dim=2)
-                    do ix=1,size(nearestIndex, dim=1)
-                        if (nearestIndex(ix,iy) == 0) then
-                            dst_field % array4i(ix,iy,:,:) = NF90_FILL_INT
-                        else
-                            dst_field % array4i(ix,iy,:,:) = src_field % array3i(:,:,nearestIndex(ix,iy))
-                        end if
-                    end do
-                    end do
-                else
-                    do iy=1,size(nearestIndex, dim=2)
-                    do ix=1,size(nearestIndex, dim=1)
-                        if (nearestIndex(ix,iy) == 0) then
-                            dst_field % array4i(ix,iy,:,:) = NF90_FILL_INT
-                        else
-                            dst_field % array4i(ix,iy,:,:) = src_field % array3i(nearestIndex(ix,iy),:,:)
-                        end if
-                    end do
-                    end do
-                end if
+#endif
+         else if (dst_field%ndims == 4) then
+            allocate (dst_field%array4d(dst_field%dimlens(1), &
+                                        dst_field%dimlens(2), &
+                                        dst_field%dimlens(3), &
+                                        dst_field%dimlens(4)))
+#ifdef NEAREST_NEIGHBOR
+            do iy = 1, size(nearestIndex, dim=2)
+               do ix = 1, size(nearestIndex, dim=1)
+                  if (nearestIndex(ix, iy) == 0) then
+                     dst_field%array4d(ix, iy, :, :) = NF90_FILL_DOUBLE
+                  else
+                     dst_field%array4d(ix, iy, :, :) = src_field%array3d(:, :, nearestIndex(ix, iy))
+                  end if
+               end do
+            end do
+#else
+            if (iand(fld_class, MPAS_MASK) > 0) then
+               do iy = 1, size(nearestIndex, dim=2)
+                  do ix = 1, size(nearestIndex, dim=1)
+                     if (sum(nodeWeights(:, ix, iy)) == 0.0) then
+                        dst_field%array4d(ix, iy, :, :) = NF90_FILL_DOUBLE
+                     else
+                        dst_field%array4d(ix, iy, :, :) = 0.0
+                        do j = 1, size(sourceNodes, dim=1)
+                           dst_field%array4d(ix, iy, :, :) = dst_field%array4d(ix, iy, :, :) + &
+                                                          nodeWeights(j, ix, iy) &
+                                                          *src_field%array3d(:, :, sourceNodes(j, ix, iy))
+                        end do
+                     end if
+                  end do
+               end do
             else
-                write(0,*) 'Remap exception: unhandled dimension for int ', dst_field % ndims
+               do iy = 1, size(nearestIndex, dim=2)
+                  do ix = 1, size(nearestIndex, dim=1)
+                     if (sum(nodeWeights(:, ix, iy)) == 0.0) then
+                        dst_field%array4d(ix, iy, :, :) = NF90_FILL_DOUBLE
+                     else
+                        dst_field%array4d(ix, iy, :, :) = 0.0
+                        do j = 1, size(sourceNodes, dim=1)
+                           dst_field%array4d(ix, iy, :, :) = dst_field%array4d(ix, iy, :, :) + &
+                                                          nodeWeights(j, ix, iy) &
+                                                          *src_field%array3d(sourceNodes(j, ix, iy), :, :)
+                        end do
+                     end if
+                  end do
+               end do
             end if
-        else
-            write(0,*) 'Remap exception: unhandled type'
-        end if
-
-    end function remap_field
-
-
-    integer function remap_field1D(verticalCoord,remap_info, src_field, dst_field) result(stat)
-
-        implicit none
-
-        character(len=*), intent(in) :: verticalCoord
-        type (remap_info_type), intent(in) :: remap_info
-        type (input_field_type), intent(in) :: src_field
-        type (target_field_type), intent(out) :: dst_field
-
-        integer :: idim
-        integer :: j
-        integer :: iy, ix
-        integer, dimension(:,:), pointer :: nearestIndex
-        integer, dimension(:,:,:), pointer :: sourceNodes
-        real, dimension(:,:,:), pointer :: nodeWeights
-        integer :: fld_class
-
-        stat = 0
-
-        fld_class = field_class(src_field % dimnames)
-
-        ! Based on mesh element type, set remapping weight fields
-        if (iand(fld_class, CELL_MASK) > 0) then
-            nearestIndex => remap_info % nearestCell
-            sourceNodes => remap_info % sourceCells
-            nodeWeights => remap_info % cellWeights
-        else if (iand(fld_class, VTX_MASK) > 0) then
-            nearestIndex => remap_info % nearestVertex
-            sourceNodes => remap_info % sourceVertices
-            nodeWeights => remap_info % vertexWeights
-        else if (iand(fld_class, EDGE_MASK) > 0) then
-            nearestIndex => remap_info % nearestEdge
-            sourceNodes => remap_info % sourceEdges
-            nodeWeights => remap_info % edgeWeights
-        else
-            write(0,*) 'Remap exception: unhandled decomposed dim'
-            stat = 1
-            
-        end if
-
-        dst_field % name = src_field % name
-        dst_field % xtype = src_field % xtype
-        if (src_field % isTimeDependent) then
-            ! Single horizontal dimension becomes two horizontal dimensions, nlat and nlon,
-            ! but the time dimension is not counted in the target field
-            dst_field % ndims = src_field % ndims
-        else
-            ! Single horizontal dimension becomes two horizontal dimensions, nlat and nlon
-            dst_field % ndims = src_field % ndims 
-        end if
-        allocate(dst_field % dimnames(dst_field % ndims))
-        allocate(dst_field % dimlens(dst_field % ndims))
- 
-        dst_field % isTimeDependent = src_field % isTimeDependent
- PRINT*,'------------------->>-',trim(src_field % name)
-        if (trim(src_field % name) == 't_iso_levels')then
-           dst_field % dimlens(1) = src_field % dimlens(1)
-           dst_field % dimnames(1) = 'level'
-        else if (trim(src_field % name) == 'u_iso_levels')then
-           dst_field % dimlens(1) = src_field % dimlens(1)
-           dst_field % dimnames(1) = 'level'
-	else if (trim(src_field % name) == 'z_iso_levels')then
-           dst_field % dimlens(1) =  src_field % dimlens(1)
-           dst_field % dimnames(1) = 'level'
-        endif  
-        ! Based on ordering of dimensions in source field, set dimension names
-        ! in the destination field
-        if (iand(fld_class, MPAS_MASK) > 0) then
-            do idim=1,dst_field % ndims-2
-                dst_field % dimlens(2+idim) = src_field % dimlens(idim)
-                dst_field % dimnames(2+idim) = src_field % dimnames(idim)
+#endif
+         else
+            write (0, *) 'Remap exception: unhandled dimension for dbl ', dst_field%ndims
+         end if
+      else if (src_field%xtype == FIELD_TYPE_INTEGER) then
+         if (dst_field%ndims == 2) then
+            allocate (dst_field%array2i(dst_field%dimlens(1), &
+                                        dst_field%dimlens(2)))
+            do iy = 1, size(nearestIndex, dim=2)
+               do ix = 1, size(nearestIndex, dim=1)
+                  if (nearestIndex(ix, iy) == 0) then
+                     dst_field%array2i(ix, iy) = NF90_FILL_INT
+                  else
+                     dst_field%array2i(ix, iy) = src_field%array1i(nearestIndex(ix, iy))
+                  end if
+               end do
             end do
-        else
-            do idim=2,dst_field % ndims-1
-                dst_field % dimlens(idim+1)  = src_field % dimlens(idim)
-                dst_field % dimnames(idim+1) = src_field % dimnames(idim)
-            end do
-        end if
-        allocate(dst_field % array1r(dst_field % dimlens(1)))
-        if (trim(src_field % name) == 't_iso_levels')then
-             DO idim=1,dst_field % dimlens(1)
-                !dst_field % array1r(idim) = src_field % array1r(dst_field % dimlens(1)+1-idim)
-                 dst_field % array1r(idim) = src_field % array1r(idim)
-             END DO
-        else if (trim(src_field % name) == 'u_iso_levels')then
-             DO idim=1,dst_field % dimlens(1)
-                !dst_field % array1r(idim) = src_field % array1r(dst_field % dimlens(1)+1-idim)
-                dst_field % array1r(idim) = src_field % array1r(idim)
-             END DO
-	else if (trim(src_field % name) == 'z_iso_levels')then
-             DO idim=1,dst_field % dimlens(1)
-                !dst_field % array1r(idim) = src_field % array1r(dst_field % dimlens(1)+1-idim)
-                dst_field % array1r(idim) = src_field % array1r(idim)
-             END DO
-        endif  
-
-    end function remap_field1D
-
-
-    integer function remap_field1DM(nVertLevels,remap_info, dst_field) result(stat)
-
-        implicit none
-
-        integer, intent(in) :: nVertLevels
-        type (remap_info_type), intent(in) :: remap_info
-
-        type (target_field_type), intent(out) :: dst_field
-
-        integer :: idim
-        integer :: j
-        integer :: iy, ix
-
-        stat = 0
-
-        dst_field % name  = 'level'
-        dst_field % xtype = FIELD_TYPE_REAL
-        
-        ! Single horizontal dimension becomes two horizontal dimensions, nlat and nlon
-        
-        dst_field % ndims = 1
-
-        allocate(dst_field % dimnames(dst_field % ndims))
-        allocate(dst_field % dimlens (dst_field % ndims))
- 
-        dst_field % isTimeDependent = .false.
-        
-        dst_field % dimlens(1) = nVertLevels
-        dst_field % dimnames(1) = 'level'
-
-        allocate(dst_field % array1r(dst_field % dimlens(1)))
-
-        DO idim=1,dst_field % dimlens(1)
-            !dst_field % array1r(idim) = nVertLevels + 1 - idim 
-            dst_field % array1r(idim) = idim 
-
-        END DO
-
-    end function remap_field1DM
-    
-    
-    
-    
-    integer function remap_fieldTime(remap_info, src_field, dst_field) result(stat)
-
-        implicit none
-
-        type (remap_info_type), intent(in) :: remap_info
-        type (input_field_type), intent(in) :: src_field
-        type (target_field_type), intent(out) :: dst_field
-
-        integer :: idim
-        integer :: j
-        integer :: iy, ix
-        integer, dimension(:,:), pointer :: nearestIndex
-        integer, dimension(:,:,:), pointer :: sourceNodes
-        real, dimension(:,:,:), pointer :: nodeWeights
-        integer :: fld_class
-
-        stat = 0
-
-        fld_class = field_class(src_field % dimnames)
-
-        ! Based on mesh element type, set remapping weight fields
-        if (iand(fld_class, CELL_MASK) > 0) then
-            nearestIndex => remap_info % nearestCell
-            sourceNodes => remap_info % sourceCells
-            nodeWeights => remap_info % cellWeights
-        else if (iand(fld_class, VTX_MASK) > 0) then
-            nearestIndex => remap_info % nearestVertex
-            sourceNodes => remap_info % sourceVertices
-            nodeWeights => remap_info % vertexWeights
-        else if (iand(fld_class, EDGE_MASK) > 0) then
-            nearestIndex => remap_info % nearestEdge
-            sourceNodes => remap_info % sourceEdges
-            nodeWeights => remap_info % edgeWeights
-        else
-            write(0,*) 'Remap exception: unhandled decomposed dim'
-            stat = 1
-            
-        end if
-
-        dst_field % name = src_field % name
-        dst_field % xtype = src_field % xtype
-        if (src_field % isTimeDependent) then
-            ! Single horizontal dimension becomes two horizontal dimensions, nlat and nlon,
-            ! but the time dimension is not counted in the target field
-            dst_field % ndims = src_field % ndims
-        else
-            ! Single horizontal dimension becomes two horizontal dimensions, nlat and nlon
-            dst_field % ndims = src_field % ndims 
-        end if
-        allocate(dst_field % dimnames(dst_field % ndims))
-        allocate(dst_field % dimlens(dst_field % ndims))
-        dst_field % isTimeDependent = src_field % isTimeDependent
-
-        dst_field % dimlens(1) = 1
-        dst_field % dimnames(1) = 'Time'
-
-        ! Based on ordering of dimensions in source field, set dimension names
-        ! in the destination field
-        if (iand(fld_class, MPAS_MASK) > 0) then
-            do idim=1,dst_field % ndims-2
-                dst_field % dimlens(2+idim) = src_field % dimlens(idim)
-                dst_field % dimnames(2+idim) = src_field % dimnames(idim)
-            end do
-        else
-            do idim=2,dst_field % ndims-1
-                dst_field % dimlens(idim+1) = src_field % dimlens(idim)
-                dst_field % dimnames(idim+1) = src_field % dimnames(idim)
-            end do
-        end if
-        allocate(dst_field % array1d(dst_field % dimlens(1)))
-           if (trim(src_field % name) == 'xtime')then
-             DO idim=1,dst_field % dimlens(1)
-                dst_field % array1d(idim) = 0
-             END DO
-        endif
-    end function remap_fieldTime
-
-    integer function remap_get_target_latitudes(remap_info, lat_field) result(stat)
-
-        implicit none
-
-        type (remap_info_type), intent(in) :: remap_info
-        type (target_field_type), intent(out) :: lat_field
-
-        real, parameter :: rad2deg = 90.0 / asin(1.0)
-
-        stat = 0
-
-
-        lat_field % name = 'latitude'
-        lat_field % xtype = FIELD_TYPE_REAL
-        lat_field % ndims = 1
-        lat_field % isTimeDependent = .false.
-
-        allocate(lat_field % dimnames(lat_field % ndims))
-        allocate(lat_field % dimlens(lat_field % ndims))
-
-        lat_field % dimnames(1) = 'latitude'
-        lat_field % dimlens(1) = remap_info % dst_mesh % nlat
-
-        allocate(lat_field % array1r(lat_field % dimlens(1)))
-        lat_field % array1r(:) = remap_info % dst_mesh % lats(1,:) * rad2deg
-
-    end function remap_get_target_latitudes
-
-
-    integer function remap_get_target_longitudes(remap_info, lon_field) result(stat)
-
-        implicit none
-
-        type (remap_info_type), intent(in) :: remap_info
-        type (target_field_type), intent(out) :: lon_field
-
-        real, parameter :: rad2deg = 90.0 / asin(1.0)
-
-        stat = 0
-
-
-        lon_field % name = 'longitude'
-        lon_field % xtype = FIELD_TYPE_REAL
-        lon_field % ndims = 1
-        lon_field % isTimeDependent = .false.
-
-        allocate(lon_field % dimnames(lon_field % ndims))
-        allocate(lon_field % dimlens(lon_field % ndims))
-
-        lon_field % dimnames(1) = 'longitude'
-        lon_field % dimlens(1) = remap_info % dst_mesh % nlon
-
-        allocate(lon_field % array1r(lon_field % dimlens(1)))
-        lon_field % array1r(:) = remap_info % dst_mesh % lons(:,1) * rad2deg
-
-    end function remap_get_target_longitudes
-
-    integer function remap_get_target_t_iso_levels(remap_info, t_iso_levels_field,nlevels) result(stat)
-
-        implicit none
-
-        type (remap_info_type), intent(in) :: remap_info
-        type (target_field_type), intent(out) :: t_iso_levels_field
-        Integer, intent(in) :: nlevels
-
-        real, parameter :: rad2deg = 90.0 / asin(1.0)
-
-        stat = 0
-
-
-        t_iso_levels_field % name = 'level'
-        t_iso_levels_field % xtype = FIELD_TYPE_REAL
-        t_iso_levels_field % ndims = 1
-        t_iso_levels_field % isTimeDependent = .false.
-
-        allocate(t_iso_levels_field % dimnames(t_iso_levels_field % ndims))
-        allocate(t_iso_levels_field % dimlens(t_iso_levels_field % ndims))
-
-        t_iso_levels_field % dimnames(1) = 'level'
-        t_iso_levels_field % dimlens(1) = nlevels
-
-        allocate(t_iso_levels_field % array1r(t_iso_levels_field % dimlens(1)))
-        t_iso_levels_field % array1r(:) =  rad2deg
-
-    end function remap_get_target_t_iso_levels
-
-    integer function remap_get_target_u_iso_levels(remap_info, u_iso_levels_field,nlevels) result(stat)
-
-        implicit none
-
-        type (remap_info_type), intent(in) :: remap_info
-        type (target_field_type), intent(out) :: u_iso_levels_field
-        Integer, intent(in) :: nlevels
-        real, parameter :: rad2deg = 90.0 / asin(1.0)
-
-        stat = 0
-
-
-        u_iso_levels_field % name = 'level'
-        u_iso_levels_field % xtype = FIELD_TYPE_REAL
-        u_iso_levels_field % ndims = 1
-        u_iso_levels_field % isTimeDependent = .false.
-
-        allocate(u_iso_levels_field % dimnames(u_iso_levels_field % ndims))
-        allocate(u_iso_levels_field % dimlens(u_iso_levels_field % ndims))
-
-        u_iso_levels_field % dimnames(1) = 'level'
-        u_iso_levels_field % dimlens(1) = nlevels
-
-        allocate(u_iso_levels_field % array1r(u_iso_levels_field % dimlens(1)))
-        u_iso_levels_field % array1r(:) =  rad2deg
-
-    end function remap_get_target_u_iso_levels
- 
- 
- 
-     integer function remap_get_target_nVertLevels(remap_info, Vert_levels_field,nlevels) result(stat)
-
-        implicit none
-
-        type (remap_info_type), intent(in) :: remap_info
-        type (target_field_type), intent(out) :: Vert_levels_field
-        Integer, intent(in) :: nlevels
-        real, parameter :: rad2deg = 90.0 / asin(1.0)
-
-        stat = 0
-
-        Vert_levels_field % name = 'level'
-        Vert_levels_field % xtype = FIELD_TYPE_REAL
-        Vert_levels_field % ndims = 1
-        Vert_levels_field % isTimeDependent = .false.
-
-        allocate(Vert_levels_field % dimnames(Vert_levels_field % ndims))
-        allocate(Vert_levels_field % dimlens (Vert_levels_field % ndims))
-
-        Vert_levels_field % dimnames(1) = 'level'
-        Vert_levels_field % dimlens(1) = nlevels
-
-        allocate(Vert_levels_field % array1r(Vert_levels_field % dimlens(1)))
-        Vert_levels_field % array1r(:) =  rad2deg
-
-    end function remap_get_target_nVertLevels
- 
-    
-    integer function remap_get_target_z_iso_levels(remap_info, z_iso_levels_field,nlevels) result(stat)
-
-        implicit none
-
-        type (remap_info_type), intent(in) :: remap_info
-        type (target_field_type), intent(out) :: z_iso_levels_field
-        Integer, intent(in) :: nlevels
-
-        real, parameter :: rad2deg = 90.0 / asin(1.0)
-
-        stat = 0
-
-
-        z_iso_levels_field % name = 'level'
-        z_iso_levels_field % xtype = FIELD_TYPE_REAL
-        z_iso_levels_field % ndims = 1
-        z_iso_levels_field % isTimeDependent = .false.
-
-        allocate(z_iso_levels_field % dimnames(z_iso_levels_field % ndims))
-        allocate(z_iso_levels_field % dimlens(z_iso_levels_field % ndims))
-
-        z_iso_levels_field % dimnames(1) = 'level'
-        z_iso_levels_field % dimlens(1) = nlevels
-
-        allocate(z_iso_levels_field % array1r(z_iso_levels_field % dimlens(1)))
-        z_iso_levels_field % array1r(:) =  rad2deg
-
-    end function remap_get_target_z_iso_levels
-
-    integer function remap_get_target_time(remap_info, time_field) result(stat)
-
-        implicit none
-
-        type (remap_info_type), intent(in) :: remap_info
-        type (target_field_type), intent(out) :: time_field
-
-        real, parameter :: rad2deg = 90.0 / asin(1.0)
-
-        stat = 0
-
-
-        time_field % name = 'Time'
-        time_field % xtype = FIELD_TYPE_REAL
-        time_field % ndims = 1
-        time_field % isTimeDependent = .false.
-
-        allocate(time_field % dimnames(time_field % ndims))
-        allocate(time_field % dimlens(time_field % ndims))
-
-        time_field % dimnames(1) = 'Time'
-        time_field % dimlens(1) = 1
-
-        allocate(time_field % array1d(time_field % dimlens(1)))
-        time_field % array1d(:) =  0
-
-    end function remap_get_target_time
-
-    integer function free_target_field(field) result(stat)
-
-        implicit none
-
-        type (target_field_type), intent(inout) :: field
-
-        stat = 0
-
-        if (associated(field % dimlens)) then
-            deallocate(field % dimlens)
-        end if
-        if (associated(field % dimnames)) then
-            deallocate(field % dimnames)
-        end if
-
-        if (associated(field % array1r)) then
-            deallocate(field % array1r)
-        end if
-        if (associated(field % array2r)) then
-            deallocate(field % array2r)
-        end if
-        if (associated(field % array3r)) then
-            deallocate(field % array3r)
-        end if
-        if (associated(field % array4r)) then
-            deallocate(field % array4r)
-        end if
-
-        if (associated(field % array1d)) then
-            deallocate(field % array1d)
-        end if
-        if (associated(field % array2d)) then
-            deallocate(field % array2d)
-        end if
-        if (associated(field % array3d)) then
-            deallocate(field % array3d)
-        end if
-        if (associated(field % array4d)) then
-            deallocate(field % array4d)
-        end if
-
-        if (associated(field % array1i)) then
-            deallocate(field % array1i)
-        end if
-        if (associated(field % array2i)) then
-            deallocate(field % array2i)
-        end if
-        if (associated(field % array3i)) then
-            deallocate(field % array3i)
-        end if
-        if (associated(field % array4i)) then
-            deallocate(field % array4i)
-        end if
-
-    end function free_target_field
-
-
-    integer function nearest_cell(target_lat, target_lon, start_cell, nCells, maxEdges, &
-                                  nEdgesOnCell, cellsOnCell, latCell, lonCell)
-
-        implicit none
-
-        real, intent(in) :: target_lat, target_lon
-        integer, intent(in) :: start_cell
-        integer, intent(in) :: nCells, maxEdges
-        integer, dimension(nCells), intent(in) :: nEdgesOnCell
-        integer, dimension(maxEdges,nCells), intent(in) :: cellsOnCell
-        real, dimension(nCells), intent(in) :: latCell, lonCell
-
-        integer :: i
-        integer :: iCell
-        integer :: current_cell
-        real :: current_distance, d
-        real :: nearest_distance
-
-        nearest_cell = start_cell
-        current_cell = -1
-
-        do while (nearest_cell /= current_cell)
-            current_cell = nearest_cell
-            current_distance = sphere_distance(latCell(current_cell), lonCell(current_cell), target_lat, &
-                                               target_lon, 1.0)
-            nearest_cell = current_cell
-            nearest_distance = current_distance
-            do i = 1, nEdgesOnCell(current_cell)
-                iCell = cellsOnCell(i,current_cell)
-                if (iCell > 0 .and. iCell <= nCells) then
-                    d = sphere_distance(latCell(iCell), lonCell(iCell), target_lat, target_lon, 1.0)
-                    if (d < nearest_distance) then
-                        nearest_cell = iCell
-                        nearest_distance = d
-                    end if
-                else
-                    nearest_cell = 0
-                    return
-                end if
-            end do
-        end do
-
-    end function nearest_cell
-
-
-    integer function nearest_vertex( target_lat, target_lon, &
-                                     start_vertex, &
-                                     nCells, nVertices, maxEdges, vertexDegree, &
-                                     nEdgesOnCell, verticesOnCell, &
-                                     cellsOnVertex, latCell, lonCell, &
-                                     latVertex, lonVertex )
-
-        implicit none
-
-        real, intent(in) :: target_lat, target_lon
-        integer, intent(in) :: start_vertex
-        integer, intent(in) :: nCells, nVertices, maxEdges, vertexDegree
-        integer, dimension(nCells), intent(in) :: nEdgesOnCell
-        integer, dimension(maxEdges,nCells), intent(in) :: verticesOnCell
-        integer, dimension(vertexDegree,nVertices), intent(in) :: cellsOnVertex
-        real, dimension(nCells), intent(in) :: latCell, lonCell
-        real, dimension(nVertices), intent(in) :: latVertex, lonVertex
-
-
-        integer :: i, cell1, cell2, cell3, iCell
-        integer :: iVtx
-        integer :: current_vertex
-        real :: cell1_dist, cell2_dist, cell3_dist
-        real :: current_distance, d
-        real :: nearest_distance
-
-        nearest_vertex = start_vertex
-        current_vertex = -1
-
-        do while (nearest_vertex /= current_vertex)
-            current_vertex = nearest_vertex
-            current_distance = sphere_distance(latVertex(current_vertex), lonVertex(current_vertex), &
-                                               target_lat,                target_lon,                1.0)
-            nearest_vertex = current_vertex
-            nearest_distance = current_distance
-            cell1 = cellsOnVertex(1,current_vertex)
-            if (cell1 <= 0) then
-                nearest_vertex = 0
-                return
+         else if (dst_field%ndims == 3) then
+            allocate (dst_field%array3i(dst_field%dimlens(1), &
+                                        dst_field%dimlens(2), &
+                                        dst_field%dimlens(3)))
+            if (iand(fld_class, MPAS_MASK) > 0) then
+               do iy = 1, size(nearestIndex, dim=2)
+                  do ix = 1, size(nearestIndex, dim=1)
+                     if (nearestIndex(ix, iy) == 0) then
+                        dst_field%array3i(ix, iy, :) = NF90_FILL_INT
+                     else
+                        dst_field%array3i(ix, iy, :) = src_field%array2i(:, nearestIndex(ix, iy))
+                     end if
+                  end do
+               end do
+            else
+               do iy = 1, size(nearestIndex, dim=2)
+                  do ix = 1, size(nearestIndex, dim=1)
+                     if (nearestIndex(ix, iy) == 0) then
+                                       dst_field%array3i(ix, iy, :) = NF90_FILL_INT
+                     else
+                        dst_field%array3i(ix, iy, :) = src_field%array2i(nearestIndex(ix, iy), :)
+                     end if
+                  end do
+               end do
             end if
-            cell1_dist = sphere_distance(latCell(cell1), lonCell(cell1), target_lat, target_lon, 1.0)
-            cell2 = cellsOnVertex(2,current_vertex)
-            if (cell2 <= 0) then
-                nearest_vertex = 0
-                return
+         else if (dst_field%ndims == 4) then
+            allocate (dst_field%array4i(dst_field%dimlens(1), &
+                                        dst_field%dimlens(2), &
+                                        dst_field%dimlens(3), &
+                                        dst_field%dimlens(4)))
+            if (iand(fld_class, MPAS_MASK) > 0) then
+               do iy = 1, size(nearestIndex, dim=2)
+                  do ix = 1, size(nearestIndex, dim=1)
+                     if (nearestIndex(ix, iy) == 0) then
+                        dst_field%array4i(ix, iy, :, :) = NF90_FILL_INT
+                     else
+                        dst_field%array4i(ix, iy, :, :) = src_field%array3i(:, :, nearestIndex(ix, iy))
+                     end if
+                  end do
+               end do
+            else
+               do iy = 1, size(nearestIndex, dim=2)
+                  do ix = 1, size(nearestIndex, dim=1)
+                     if (nearestIndex(ix, iy) == 0) then
+                        dst_field%array4i(ix, iy, :, :) = NF90_FILL_INT
+                     else
+                        dst_field%array4i(ix, iy, :, :) = src_field%array3i(nearestIndex(ix, iy), :, :)
+                     end if
+                  end do
+               end do
             end if
-            cell2_dist = sphere_distance(latCell(cell2), lonCell(cell2), target_lat, target_lon, 1.0)
-            if (vertexDegree == 3) then
-               cell3 = cellsOnVertex(3,current_vertex)
-               if (cell3 <= 0) then
-                   nearest_vertex = 0
-                   return
+         else
+            write (0, *) 'Remap exception: unhandled dimension for int ', dst_field%ndims
+         end if
+      else
+         write (0, *) 'Remap exception: unhandled type'
+      end if
+
+   end function remap_field
+
+   integer function remap_field1D(verticalCoord, remap_info, src_field, dst_field) result(stat)
+
+      implicit none
+
+      character(len=*), intent(in) :: verticalCoord
+      type(remap_info_type), intent(in) :: remap_info
+      type(input_field_type), intent(in) :: src_field
+      type(target_field_type), intent(out) :: dst_field
+
+      integer :: idim
+      integer :: j
+      integer :: iy, ix
+      integer, dimension(:, :), pointer :: nearestIndex
+      integer, dimension(:, :, :), pointer :: sourceNodes
+      real, dimension(:, :, :), pointer :: nodeWeights
+      integer :: fld_class
+
+      stat = 0
+
+      fld_class = field_class(src_field%dimnames)
+
+      ! Based on mesh element type, set remapping weight fields
+      if (iand(fld_class, CELL_MASK) > 0) then
+         nearestIndex => remap_info%nearestCell
+         sourceNodes => remap_info%sourceCells
+         nodeWeights => remap_info%cellWeights
+      else if (iand(fld_class, VTX_MASK) > 0) then
+         nearestIndex => remap_info%nearestVertex
+         sourceNodes => remap_info%sourceVertices
+         nodeWeights => remap_info%vertexWeights
+      else if (iand(fld_class, EDGE_MASK) > 0) then
+         nearestIndex => remap_info%nearestEdge
+         sourceNodes => remap_info%sourceEdges
+         nodeWeights => remap_info%edgeWeights
+      else
+         write (0, *) 'Remap exception: unhandled decomposed dim'
+         stat = 1
+
+      end if
+
+      dst_field%name = src_field%name
+      dst_field%xtype = src_field%xtype
+      if (src_field%isTimeDependent) then
+         ! Single horizontal dimension becomes two horizontal dimensions, nlat and nlon,
+         ! but the time dimension is not counted in the target field
+         dst_field%ndims = src_field%ndims
+      else
+         ! Single horizontal dimension becomes two horizontal dimensions, nlat and nlon
+         dst_field%ndims = src_field%ndims
+      end if
+      allocate (dst_field%dimnames(dst_field%ndims))
+      allocate (dst_field%dimlens(dst_field%ndims))
+
+      dst_field%isTimeDependent = src_field%isTimeDependent
+      print *, '------------------->>-', trim(src_field%name)
+      if (trim(src_field%name) == 't_iso_levels') then
+         dst_field%dimlens(1) = src_field%dimlens(1)
+         dst_field%dimnames(1) = 'level'
+      else if (trim(src_field%name) == 'u_iso_levels') then
+         dst_field%dimlens(1) = src_field%dimlens(1)
+         dst_field%dimnames(1) = 'level'
+      else if (trim(src_field%name) == 'z_iso_levels') then
+         dst_field%dimlens(1) = src_field%dimlens(1)
+         dst_field%dimnames(1) = 'level'
+      end if
+      ! Based on ordering of dimensions in source field, set dimension names
+      ! in the destination field
+      if (iand(fld_class, MPAS_MASK) > 0) then
+         do idim = 1, dst_field%ndims - 2
+            dst_field%dimlens(2 + idim) = src_field%dimlens(idim)
+            dst_field%dimnames(2 + idim) = src_field%dimnames(idim)
+         end do
+      else
+         do idim = 2, dst_field%ndims - 1
+            dst_field%dimlens(idim + 1) = src_field%dimlens(idim)
+            dst_field%dimnames(idim + 1) = src_field%dimnames(idim)
+         end do
+      end if
+      allocate (dst_field%array1r(dst_field%dimlens(1)))
+      if (trim(src_field%name) == 't_iso_levels') then
+         do idim = 1, dst_field%dimlens(1)
+            !dst_field % array1r(idim) = src_field % array1r(dst_field % dimlens(1)+1-idim)
+            dst_field%array1r(idim) = src_field%array1r(idim)
+         end do
+      else if (trim(src_field%name) == 'u_iso_levels') then
+         do idim = 1, dst_field%dimlens(1)
+            !dst_field % array1r(idim) = src_field % array1r(dst_field % dimlens(1)+1-idim)
+            dst_field%array1r(idim) = src_field%array1r(idim)
+         end do
+      else if (trim(src_field%name) == 'z_iso_levels') then
+         do idim = 1, dst_field%dimlens(1)
+            !dst_field % array1r(idim) = src_field % array1r(dst_field % dimlens(1)+1-idim)
+            dst_field%array1r(idim) = src_field%array1r(idim)
+         end do
+      end if
+
+   end function remap_field1D
+
+   integer function remap_field1DM(nVertLevels, remap_info, dst_field) result(stat)
+
+      implicit none
+
+      integer, intent(in) :: nVertLevels
+      type(remap_info_type), intent(in) :: remap_info
+
+      type(target_field_type), intent(out) :: dst_field
+
+      integer :: idim
+      integer :: j
+      integer :: iy, ix
+
+      stat = 0
+
+      dst_field%name = 'level'
+      dst_field%xtype = FIELD_TYPE_REAL
+
+      ! Single horizontal dimension becomes two horizontal dimensions, nlat and nlon
+
+      dst_field%ndims = 1
+
+      allocate (dst_field%dimnames(dst_field%ndims))
+      allocate (dst_field%dimlens(dst_field%ndims))
+
+      dst_field%isTimeDependent = .false.
+
+      dst_field%dimlens(1) = nVertLevels
+      dst_field%dimnames(1) = 'level'
+
+      allocate (dst_field%array1r(dst_field%dimlens(1)))
+
+      do idim = 1, dst_field%dimlens(1)
+         !dst_field % array1r(idim) = nVertLevels + 1 - idim
+         dst_field%array1r(idim) = idim
+
+      end do
+
+   end function remap_field1DM
+
+   integer function remap_fieldTime(remap_info, src_field, dst_field) result(stat)
+
+      implicit none
+
+      type(remap_info_type), intent(in) :: remap_info
+      type(input_field_type), intent(in) :: src_field
+      type(target_field_type), intent(out) :: dst_field
+
+      integer :: idim
+      integer :: j
+      integer :: iy, ix
+      integer, dimension(:, :), pointer :: nearestIndex
+      integer, dimension(:, :, :), pointer :: sourceNodes
+      real, dimension(:, :, :), pointer :: nodeWeights
+      integer :: fld_class
+
+      stat = 0
+
+      fld_class = field_class(src_field%dimnames)
+
+      ! Based on mesh element type, set remapping weight fields
+      if (iand(fld_class, CELL_MASK) > 0) then
+         nearestIndex => remap_info%nearestCell
+         sourceNodes => remap_info%sourceCells
+         nodeWeights => remap_info%cellWeights
+      else if (iand(fld_class, VTX_MASK) > 0) then
+         nearestIndex => remap_info%nearestVertex
+         sourceNodes => remap_info%sourceVertices
+         nodeWeights => remap_info%vertexWeights
+      else if (iand(fld_class, EDGE_MASK) > 0) then
+         nearestIndex => remap_info%nearestEdge
+         sourceNodes => remap_info%sourceEdges
+         nodeWeights => remap_info%edgeWeights
+      else
+         write (0, *) 'Remap exception: unhandled decomposed dim'
+         stat = 1
+
+      end if
+
+      dst_field%name = src_field%name
+      dst_field%xtype = src_field%xtype
+      if (src_field%isTimeDependent) then
+         ! Single horizontal dimension becomes two horizontal dimensions, nlat and nlon,
+         ! but the time dimension is not counted in the target field
+         dst_field%ndims = src_field%ndims
+      else
+         ! Single horizontal dimension becomes two horizontal dimensions, nlat and nlon
+         dst_field%ndims = src_field%ndims
+      end if
+      allocate (dst_field%dimnames(dst_field%ndims))
+      allocate (dst_field%dimlens(dst_field%ndims))
+      dst_field%isTimeDependent = src_field%isTimeDependent
+
+      dst_field%dimlens(1) = 1
+      dst_field%dimnames(1) = 'Time'
+
+      ! Based on ordering of dimensions in source field, set dimension names
+      ! in the destination field
+      if (iand(fld_class, MPAS_MASK) > 0) then
+         do idim = 1, dst_field%ndims - 2
+            dst_field%dimlens(2 + idim) = src_field%dimlens(idim)
+            dst_field%dimnames(2 + idim) = src_field%dimnames(idim)
+         end do
+      else
+         do idim = 2, dst_field%ndims - 1
+            dst_field%dimlens(idim + 1) = src_field%dimlens(idim)
+            dst_field%dimnames(idim + 1) = src_field%dimnames(idim)
+         end do
+      end if
+      allocate (dst_field%array1d(dst_field%dimlens(1)))
+      if (trim(src_field%name) == 'xtime') then
+         do idim = 1, dst_field%dimlens(1)
+            dst_field%array1d(idim) = 0
+         end do
+      end if
+   end function remap_fieldTime
+
+   integer function remap_get_target_latitudes(remap_info, lat_field) result(stat)
+
+      implicit none
+
+      type(remap_info_type), intent(in) :: remap_info
+      type(target_field_type), intent(out) :: lat_field
+
+      real, parameter :: rad2deg = 90.0/asin(1.0)
+
+      stat = 0
+
+      lat_field%name = 'latitude'
+      lat_field%xtype = FIELD_TYPE_REAL
+      lat_field%ndims = 1
+      lat_field%isTimeDependent = .false.
+
+      allocate (lat_field%dimnames(lat_field%ndims))
+      allocate (lat_field%dimlens(lat_field%ndims))
+
+      lat_field%dimnames(1) = 'latitude'
+      lat_field%dimlens(1) = remap_info%dst_mesh%nlat
+
+      allocate (lat_field%array1r(lat_field%dimlens(1)))
+      lat_field%array1r(:) = remap_info%dst_mesh%lats(1, :)*rad2deg
+
+   end function remap_get_target_latitudes
+
+   integer function remap_get_target_longitudes(remap_info, lon_field) result(stat)
+
+      implicit none
+
+      type(remap_info_type), intent(in) :: remap_info
+      type(target_field_type), intent(out) :: lon_field
+
+      real, parameter :: rad2deg = 90.0/asin(1.0)
+
+      stat = 0
+
+      lon_field%name = 'longitude'
+      lon_field%xtype = FIELD_TYPE_REAL
+      lon_field%ndims = 1
+      lon_field%isTimeDependent = .false.
+
+      allocate (lon_field%dimnames(lon_field%ndims))
+      allocate (lon_field%dimlens(lon_field%ndims))
+
+      lon_field%dimnames(1) = 'longitude'
+      lon_field%dimlens(1) = remap_info%dst_mesh%nlon
+
+      allocate (lon_field%array1r(lon_field%dimlens(1)))
+      lon_field%array1r(:) = remap_info%dst_mesh%lons(:, 1)*rad2deg
+
+   end function remap_get_target_longitudes
+
+   integer function remap_get_target_t_iso_levels(remap_info, t_iso_levels_field, nlevels) result(stat)
+
+      implicit none
+
+      type(remap_info_type), intent(in) :: remap_info
+      type(target_field_type), intent(out) :: t_iso_levels_field
+      integer, intent(in) :: nlevels
+
+      real, parameter :: rad2deg = 90.0/asin(1.0)
+
+      stat = 0
+
+      t_iso_levels_field%name = 'level'
+      t_iso_levels_field%xtype = FIELD_TYPE_REAL
+      t_iso_levels_field%ndims = 1
+      t_iso_levels_field%isTimeDependent = .false.
+
+      allocate (t_iso_levels_field%dimnames(t_iso_levels_field%ndims))
+      allocate (t_iso_levels_field%dimlens(t_iso_levels_field%ndims))
+
+      t_iso_levels_field%dimnames(1) = 'level'
+      t_iso_levels_field%dimlens(1) = nlevels
+
+      allocate (t_iso_levels_field%array1r(t_iso_levels_field%dimlens(1)))
+      t_iso_levels_field%array1r(:) = rad2deg
+
+   end function remap_get_target_t_iso_levels
+
+   integer function remap_get_target_u_iso_levels(remap_info, u_iso_levels_field, nlevels) result(stat)
+
+      implicit none
+
+      type(remap_info_type), intent(in) :: remap_info
+      type(target_field_type), intent(out) :: u_iso_levels_field
+      integer, intent(in) :: nlevels
+      real, parameter :: rad2deg = 90.0/asin(1.0)
+
+      stat = 0
+
+      u_iso_levels_field%name = 'level'
+      u_iso_levels_field%xtype = FIELD_TYPE_REAL
+      u_iso_levels_field%ndims = 1
+      u_iso_levels_field%isTimeDependent = .false.
+
+      allocate (u_iso_levels_field%dimnames(u_iso_levels_field%ndims))
+      allocate (u_iso_levels_field%dimlens(u_iso_levels_field%ndims))
+
+      u_iso_levels_field%dimnames(1) = 'level'
+      u_iso_levels_field%dimlens(1) = nlevels
+
+      allocate (u_iso_levels_field%array1r(u_iso_levels_field%dimlens(1)))
+      u_iso_levels_field%array1r(:) = rad2deg
+
+   end function remap_get_target_u_iso_levels
+
+   integer function remap_get_target_nVertLevels(remap_info, Vert_levels_field, nlevels) result(stat)
+
+      implicit none
+
+      type(remap_info_type), intent(in) :: remap_info
+      type(target_field_type), intent(out) :: Vert_levels_field
+      integer, intent(in) :: nlevels
+      real, parameter :: rad2deg = 90.0/asin(1.0)
+
+      stat = 0
+
+      Vert_levels_field%name = 'level'
+      Vert_levels_field%xtype = FIELD_TYPE_REAL
+      Vert_levels_field%ndims = 1
+      Vert_levels_field%isTimeDependent = .false.
+
+      allocate (Vert_levels_field%dimnames(Vert_levels_field%ndims))
+      allocate (Vert_levels_field%dimlens(Vert_levels_field%ndims))
+
+      Vert_levels_field%dimnames(1) = 'level'
+      Vert_levels_field%dimlens(1) = nlevels
+
+      allocate (Vert_levels_field%array1r(Vert_levels_field%dimlens(1)))
+      Vert_levels_field%array1r(:) = rad2deg
+
+   end function remap_get_target_nVertLevels
+
+   integer function remap_get_target_z_iso_levels(remap_info, z_iso_levels_field, nlevels) result(stat)
+
+      implicit none
+
+      type(remap_info_type), intent(in) :: remap_info
+      type(target_field_type), intent(out) :: z_iso_levels_field
+      integer, intent(in) :: nlevels
+
+      real, parameter :: rad2deg = 90.0/asin(1.0)
+
+      stat = 0
+
+      z_iso_levels_field%name = 'level'
+      z_iso_levels_field%xtype = FIELD_TYPE_REAL
+      z_iso_levels_field%ndims = 1
+      z_iso_levels_field%isTimeDependent = .false.
+
+      allocate (z_iso_levels_field%dimnames(z_iso_levels_field%ndims))
+      allocate (z_iso_levels_field%dimlens(z_iso_levels_field%ndims))
+
+      z_iso_levels_field%dimnames(1) = 'level'
+      z_iso_levels_field%dimlens(1) = nlevels
+
+      allocate (z_iso_levels_field%array1r(z_iso_levels_field%dimlens(1)))
+      z_iso_levels_field%array1r(:) = rad2deg
+
+   end function remap_get_target_z_iso_levels
+
+   integer function remap_get_target_time(remap_info, time_field) result(stat)
+
+      implicit none
+
+      type(remap_info_type), intent(in) :: remap_info
+      type(target_field_type), intent(out) :: time_field
+
+      real, parameter :: rad2deg = 90.0/asin(1.0)
+
+      stat = 0
+
+      time_field%name = 'Time'
+      time_field%xtype = FIELD_TYPE_REAL
+      time_field%ndims = 1
+      time_field%isTimeDependent = .false.
+
+      allocate (time_field%dimnames(time_field%ndims))
+      allocate (time_field%dimlens(time_field%ndims))
+
+      time_field%dimnames(1) = 'Time'
+      time_field%dimlens(1) = 1
+
+      allocate (time_field%array1d(time_field%dimlens(1)))
+      time_field%array1d(:) = 0
+
+   end function remap_get_target_time
+
+   integer function free_target_field(field) result(stat)
+
+      implicit none
+
+      type(target_field_type), intent(inout) :: field
+
+      stat = 0
+
+      if (associated(field%dimlens)) then
+         deallocate (field%dimlens)
+      end if
+      if (associated(field%dimnames)) then
+         deallocate (field%dimnames)
+      end if
+
+      if (associated(field%array1r)) then
+         deallocate (field%array1r)
+      end if
+      if (associated(field%array2r)) then
+         deallocate (field%array2r)
+      end if
+      if (associated(field%array3r)) then
+         deallocate (field%array3r)
+      end if
+      if (associated(field%array4r)) then
+         deallocate (field%array4r)
+      end if
+
+      if (associated(field%array1d)) then
+         deallocate (field%array1d)
+      end if
+      if (associated(field%array2d)) then
+         deallocate (field%array2d)
+      end if
+      if (associated(field%array3d)) then
+         deallocate (field%array3d)
+      end if
+      if (associated(field%array4d)) then
+         deallocate (field%array4d)
+      end if
+
+      if (associated(field%array1i)) then
+         deallocate (field%array1i)
+      end if
+      if (associated(field%array2i)) then
+         deallocate (field%array2i)
+      end if
+      if (associated(field%array3i)) then
+         deallocate (field%array3i)
+      end if
+      if (associated(field%array4i)) then
+         deallocate (field%array4i)
+      end if
+
+   end function free_target_field
+
+   integer function nearest_cell(target_lat, target_lon, start_cell, nCells, maxEdges, &
+                                 nEdgesOnCell, cellsOnCell, latCell, lonCell)
+
+      implicit none
+
+      real, intent(in) :: target_lat, target_lon
+      integer, intent(in) :: start_cell
+      integer, intent(in) :: nCells, maxEdges
+      integer, dimension(nCells), intent(in) :: nEdgesOnCell
+      integer, dimension(maxEdges, nCells), intent(in) :: cellsOnCell
+      real, dimension(nCells), intent(in) :: latCell, lonCell
+
+      integer :: i
+      integer :: iCell
+      integer :: current_cell
+      real :: current_distance, d
+      real :: nearest_distance
+
+      nearest_cell = start_cell
+      current_cell = -1
+
+      do while (nearest_cell /= current_cell)
+         current_cell = nearest_cell
+         current_distance = sphere_distance(latCell(current_cell), lonCell(current_cell), target_lat, &
+                                            target_lon, 1.0)
+         nearest_cell = current_cell
+         nearest_distance = current_distance
+         do i = 1, nEdgesOnCell(current_cell)
+            iCell = cellsOnCell(i, current_cell)
+            if (iCell > 0 .and. iCell <= nCells) then
+               d = sphere_distance(latCell(iCell), lonCell(iCell), target_lat, target_lon, 1.0)
+               if (d < nearest_distance) then
+                  nearest_cell = iCell
+                  nearest_distance = d
                end if
-               cell3_dist = sphere_distance(latCell(cell3), lonCell(cell3), target_lat, target_lon, 1.0)
-            end if
-            if (vertexDegree == 3) then
-                if (cell1_dist < cell2_dist) then
-                    if (cell1_dist < cell3_dist) then
-                        iCell = cell1
-                    else
-                        iCell = cell3
-                    end if
-                else
-                    if (cell2_dist < cell3_dist) then
-                        iCell = cell2
-                    else
-                        iCell = cell3
-                    end if
-                end if
             else
-                if (cell1_dist < cell2_dist) then
-                    iCell = cell1
-                else
-                    iCell = cell2
-                end if
+               nearest_cell = 0
+               return
             end if
-            do i = 1, nEdgesOnCell(iCell)
-                iVtx = verticesOnCell(i,iCell)
-                d = sphere_distance(latVertex(iVtx), lonVertex(iVtx), target_lat, target_lon, 1.0)
-                if (d < nearest_distance) then
-                    nearest_vertex = iVtx
-                    nearest_distance = d
-                end if
-            end do
-        end do
+         end do
+      end do
 
-    end function nearest_vertex
+   end function nearest_cell
 
+   integer function nearest_vertex(target_lat, target_lon, &
+                                   start_vertex, &
+                                   nCells, nVertices, maxEdges, vertexDegree, &
+                                   nEdgesOnCell, verticesOnCell, &
+                                   cellsOnVertex, latCell, lonCell, &
+                                   latVertex, lonVertex)
 
-    real function sphere_distance(lat1, lon1, lat2, lon2, radius)
+      implicit none
+
+      real, intent(in) :: target_lat, target_lon
+      integer, intent(in) :: start_vertex
+      integer, intent(in) :: nCells, nVertices, maxEdges, vertexDegree
+      integer, dimension(nCells), intent(in) :: nEdgesOnCell
+      integer, dimension(maxEdges, nCells), intent(in) :: verticesOnCell
+      integer, dimension(vertexDegree, nVertices), intent(in) :: cellsOnVertex
+      real, dimension(nCells), intent(in) :: latCell, lonCell
+      real, dimension(nVertices), intent(in) :: latVertex, lonVertex
+
+      integer :: i, cell1, cell2, cell3, iCell
+      integer :: iVtx
+      integer :: current_vertex
+      real :: cell1_dist, cell2_dist, cell3_dist
+      real :: current_distance, d
+      real :: nearest_distance
+
+      nearest_vertex = start_vertex
+      current_vertex = -1
+
+      do while (nearest_vertex /= current_vertex)
+         current_vertex = nearest_vertex
+         current_distance = sphere_distance(latVertex(current_vertex), lonVertex(current_vertex), &
+                                            target_lat, target_lon, 1.0)
+         nearest_vertex = current_vertex
+         nearest_distance = current_distance
+         cell1 = cellsOnVertex(1, current_vertex)
+         if (cell1 <= 0) then
+            nearest_vertex = 0
+            return
+         end if
+         cell1_dist = sphere_distance(latCell(cell1), lonCell(cell1), target_lat, target_lon, 1.0)
+         cell2 = cellsOnVertex(2, current_vertex)
+         if (cell2 <= 0) then
+            nearest_vertex = 0
+            return
+         end if
+         cell2_dist = sphere_distance(latCell(cell2), lonCell(cell2), target_lat, target_lon, 1.0)
+         if (vertexDegree == 3) then
+            cell3 = cellsOnVertex(3, current_vertex)
+            if (cell3 <= 0) then
+               nearest_vertex = 0
+               return
+            end if
+            cell3_dist = sphere_distance(latCell(cell3), lonCell(cell3), target_lat, target_lon, 1.0)
+         end if
+         if (vertexDegree == 3) then
+            if (cell1_dist < cell2_dist) then
+               if (cell1_dist < cell3_dist) then
+                  iCell = cell1
+               else
+                  iCell = cell3
+               end if
+            else
+               if (cell2_dist < cell3_dist) then
+                  iCell = cell2
+               else
+                  iCell = cell3
+               end if
+            end if
+         else
+            if (cell1_dist < cell2_dist) then
+               iCell = cell1
+            else
+               iCell = cell2
+            end if
+         end if
+         do i = 1, nEdgesOnCell(iCell)
+            iVtx = verticesOnCell(i, iCell)
+            d = sphere_distance(latVertex(iVtx), lonVertex(iVtx), target_lat, target_lon, 1.0)
+            if (d < nearest_distance) then
+               nearest_vertex = iVtx
+               nearest_distance = d
+            end if
+         end do
+      end do
+
+   end function nearest_vertex
+
+   real function sphere_distance(lat1, lon1, lat2, lon2, radius)
     !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-    ! Compute the great-circle distance between (lat1, lon1) and (lat2, lon2) on a
-    !   sphere with given radius.
+      ! Compute the great-circle distance between (lat1, lon1) and (lat2, lon2) on a
+      !   sphere with given radius.
     !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 
-        implicit none
+      implicit none
 
-        real, intent(in) :: lat1, lon1, lat2, lon2, radius
+      real, intent(in) :: lat1, lon1, lat2, lon2, radius
 
-        real :: arg1
+      real :: arg1
 
-        arg1 = sqrt( sin(0.5*(lat2-lat1))**2 +  &
-                     cos(lat1)*cos(lat2)*sin(0.5*(lon2-lon1))**2 )
-        sphere_distance = 2.*radius*asin(arg1)
+      arg1 = sqrt(sin(0.5*(lat2 - lat1))**2 + &
+                  cos(lat1)*cos(lat2)*sin(0.5*(lon2 - lon1))**2)
+      sphere_distance = 2.*radius*asin(arg1)
 
-    end function sphere_distance
+   end function sphere_distance
 
+   !***********************************************************************
+   !
+   !  function mpas_wachspress_coordinates
+   !
+   !> \brief Compute the barycentric Wachspress coordinates for a polygon
+   !> \author  Phillip Wolfram
+   !> \date    01/26/2015
+   !> \details
+   !>  Computes the barycentric Wachspress coordinates for a polygon with nVertices
+   !>  points in R3, vertCoords for a particular pointInterp with normalized radius.
+   !>  Follows Gillette, A., Rand, A., Bajaj, C., 2011.
+   !>  Error estimates for generalized barycentric interpolation.
+   !>  Advances in computational mathematics 37 (3), 417–439.
+   !>  Optimized version of mpas_wachspress_coordinates uses optional cached B_i areas
+   !------------------------------------------------------------------------
+   function mpas_wachspress_coordinates(nVertices, vertCoords, pointInterp, areaBin)
 
-    !***********************************************************************
-    !
-    !  function mpas_wachspress_coordinates
-    !
-    !> \brief Compute the barycentric Wachspress coordinates for a polygon
-    !> \author  Phillip Wolfram
-    !> \date    01/26/2015
-    !> \details
-    !>  Computes the barycentric Wachspress coordinates for a polygon with nVertices
-    !>  points in R3, vertCoords for a particular pointInterp with normalized radius.
-    !>  Follows Gillette, A., Rand, A., Bajaj, C., 2011.
-    !>  Error estimates for generalized barycentric interpolation.
-    !>  Advances in computational mathematics 37 (3), 417–439.
-    !>  Optimized version of mpas_wachspress_coordinates uses optional cached B_i areas
-    !------------------------------------------------------------------------
-    function mpas_wachspress_coordinates(nVertices, vertCoords, pointInterp, areaBin)
+      implicit none
 
-        implicit none
+      ! input points
+      integer, intent(in) :: nVertices
+      real, dimension(3, nVertices), intent(in) :: vertCoords
+      real, dimension(3), intent(in) :: pointInterp
+      real, dimension(nVertices), optional, intent(in) :: areaBin
 
-        ! input points
-        integer, intent(in) :: nVertices
-        real, dimension(3, nVertices), intent(in) :: vertCoords
-        real, dimension(3), intent(in) :: pointInterp
-        real, dimension(nVertices), optional, intent(in) :: areaBin
+      ! output
+      real, dimension(nVertices) :: mpas_wachspress_coordinates
 
-        ! output
-        real, dimension(nVertices) :: mpas_wachspress_coordinates
+      ! parameters
+      integer, parameter :: RHI = selected_real_kind(12)
 
-        ! parameters
-        integer, parameter :: RHI = selected_real_kind(12)
+      ! computational intermediates
+      real(kind=RHI), dimension(nVertices) :: wach ! The wachpress area-product
+      real(kind=RHI) :: wach_total ! The wachpress total weight
+      integer :: i, j ! Loop indices
+      integer :: im1, i0, ip1 ! im1 = (i-1), i0 = i, ip1 = (i+1)
 
-        ! computational intermediates
-        real(kind=RHI), dimension(nVertices) :: wach       ! The wachpress area-product
-        real(kind=RHI) :: wach_total                       ! The wachpress total weight
-        integer :: i, j                                       ! Loop indices
-        integer :: im1, i0, ip1                               ! im1 = (i-1), i0 = i, ip1 = (i+1)
+      ! triangle areas to compute wachspress coordinate
+      real, dimension(nVertices) :: areaA
+      real, dimension(nVertices) :: areaB
 
-        ! triangle areas to compute wachspress coordinate
-        real, dimension(nVertices) :: areaA
-        real, dimension(nVertices) :: areaB
+      real :: radiusLocal
 
-        real :: radiusLocal
+      radiusLocal = sqrt(sum(vertCoords(:, 1)**2))
 
-        radiusLocal = sqrt(sum(vertCoords(:,1)**2))
-
-        if (.not. present(areaBin)) then
-            ! compute areas
-            do i = 1, nVertices
-                ! compute first area B_i
-                ! get vertex indices
-                im1 = mod(nVertices + i - 2, nVertices) + 1
-                i0  = mod(nVertices + i - 1, nVertices) + 1
-                ip1 = mod(nVertices + i    , nVertices) + 1
-
-                ! precompute B_i areas
-                ! always the same because B_i independent of xp,yp,zp
-                ! (COULD CACHE AND USE RESULT FROM ARRAY FOR FURTHER OPTIMIZATION)
-                areaB(i) = mpas_triangle_signed_area_sphere(vertCoords(:, im1), vertCoords(:, i0), vertCoords(:, ip1), radiusLocal)
-            end do
-        else
-            ! assign areas
-            do i = 1, nVertices
-                areaB(i) = areaBin(i)
-            end do
-        end if
-
-        ! compute areas
-        do i = 1, nVertices
+      if (.not. present(areaBin)) then
+         ! compute areas
+         do i = 1, nVertices
             ! compute first area B_i
             ! get vertex indices
             im1 = mod(nVertices + i - 2, nVertices) + 1
-            i0  = mod(nVertices + i - 1, nVertices) + 1
-            ip1 = mod(nVertices + i    , nVertices) + 1
+            i0 = mod(nVertices + i - 1, nVertices) + 1
+            ip1 = mod(nVertices + i, nVertices) + 1
 
-            ! compute A_ij areas
-            ! must be computed each time
-            areaA(i0) = mpas_triangle_signed_area_sphere(pointInterp, vertCoords(:, i0), vertCoords(:, ip1), radiusLocal)
+            ! precompute B_i areas
+            ! always the same because B_i independent of xp,yp,zp
+            ! (COULD CACHE AND USE RESULT FROM ARRAY FOR FURTHER OPTIMIZATION)
+            areaB(i) = mpas_triangle_signed_area_sphere(vertCoords(:, im1), vertCoords(:, i0), vertCoords(:, ip1), radiusLocal)
+         end do
+      else
+         ! assign areas
+         do i = 1, nVertices
+            areaB(i) = areaBin(i)
+         end do
+      end if
 
-            ! precomputed B_i areas, cached
-        end do
+      ! compute areas
+      do i = 1, nVertices
+         ! compute first area B_i
+         ! get vertex indices
+         im1 = mod(nVertices + i - 2, nVertices) + 1
+         i0 = mod(nVertices + i - 1, nVertices) + 1
+         ip1 = mod(nVertices + i, nVertices) + 1
 
+         ! compute A_ij areas
+         ! must be computed each time
+         areaA(i0) = mpas_triangle_signed_area_sphere(pointInterp, vertCoords(:, i0), vertCoords(:, ip1), radiusLocal)
 
-        ! for each vertex compute wachpress coordinate
-        do i = 1, nVertices
-            wach(i) = areaB(i)
-            do j = (i + 1), (i + nVertices - 2)
-                i0  = mod(nVertices + j - 1, nVertices) + 1
-                ! accumulate products for A_ij subareas
-                wach(i) = wach(i) * areaA(i0)
-            end do
-        end do
+         ! precomputed B_i areas, cached
+      end do
 
-        ! get summed weights for normalization
-        wach_total = 0
-        do i = 1, nVertices
-            wach_total = wach_total + wach(i)
-        end do
+      ! for each vertex compute wachpress coordinate
+      do i = 1, nVertices
+         wach(i) = areaB(i)
+         do j = (i + 1), (i + nVertices - 2)
+            i0 = mod(nVertices + j - 1, nVertices) + 1
+            ! accumulate products for A_ij subareas
+            wach(i) = wach(i)*areaA(i0)
+         end do
+      end do
 
-        ! compute lambda
-        mpas_wachspress_coordinates= 0.0
-        do i = 1, nVertices
-            mpas_wachspress_coordinates(i) = real(wach(i)/wach_total)
-        end do
+      ! get summed weights for normalization
+      wach_total = 0
+      do i = 1, nVertices
+         wach_total = wach_total + wach(i)
+      end do
 
-    end function mpas_wachspress_coordinates
+      ! compute lambda
+      mpas_wachspress_coordinates = 0.0
+      do i = 1, nVertices
+         mpas_wachspress_coordinates(i) = real(wach(i)/wach_total)
+      end do
 
+   end function mpas_wachspress_coordinates
 
-    !***********************************************************************
-    !
-    !  routine mpas_triangle_signed_area_sphere
-    !
-    !> \brief   Calculates area of a triangle on a sphere
-    !> \author  Matthew Hoffman
-    !> \date    13 January 2015
-    !> \details
-    !>  This routine calculates the area of a triangle on the surface of a sphere.
-    !>  Uses the spherical analog of Heron's formula.
-    !>  Copied from mesh generator.  A CCW winding angle is positive.
-    !-----------------------------------------------------------------------
-    real function mpas_triangle_signed_area_sphere(a, b, c, radius)
+   !***********************************************************************
+   !
+   !  routine mpas_triangle_signed_area_sphere
+   !
+   !> \brief   Calculates area of a triangle on a sphere
+   !> \author  Matthew Hoffman
+   !> \date    13 January 2015
+   !> \details
+   !>  This routine calculates the area of a triangle on the surface of a sphere.
+   !>  Uses the spherical analog of Heron's formula.
+   !>  Copied from mesh generator.  A CCW winding angle is positive.
+   !-----------------------------------------------------------------------
+   real function mpas_triangle_signed_area_sphere(a, b, c, radius)
 
-        implicit none
+      implicit none
 
-        !-----------------------------------------------------------------
-        ! input variables
-        !-----------------------------------------------------------------
-        real, dimension(3), intent(in) :: a, b, c  !< Input: 3d (x,y,z) points forming the triangle in which to calculate the bary weights
-        real, intent(in) :: radius  !< sphere radius
+      !-----------------------------------------------------------------
+      ! input variables
+      !-----------------------------------------------------------------
+      real, dimension(3), intent(in) :: a, b, c !< Input: 3d (x,y,z) points forming the triangle in which to calculate the bary weights
+      real, intent(in) :: radius !< sphere radius
 
-        !-----------------------------------------------------------------
-        ! local variables
-        !-----------------------------------------------------------------
-        real :: ab, bc, ca, semiperim, tanqe
-        real, dimension(3) :: ablen, aclen, Dlen
+      !-----------------------------------------------------------------
+      ! local variables
+      !-----------------------------------------------------------------
+      real :: ab, bc, ca, semiperim, tanqe
+      real, dimension(3) :: ablen, aclen, Dlen
 
-        ab = mpas_arc_length(a(1), a(2), a(3), b(1), b(2), b(3))/radius
-        bc = mpas_arc_length(b(1), b(2), b(3), c(1), c(2), c(3))/radius
-        ca = mpas_arc_length(c(1), c(2), c(3), a(1), a(2), a(3))/radius
-        semiperim = 0.5 * (ab + bc + ca)
+      ab = mpas_arc_length(a(1), a(2), a(3), b(1), b(2), b(3))/radius
+      bc = mpas_arc_length(b(1), b(2), b(3), c(1), c(2), c(3))/radius
+      ca = mpas_arc_length(c(1), c(2), c(3), a(1), a(2), a(3))/radius
+      semiperim = 0.5*(ab + bc + ca)
 
-        tanqe = sqrt(max(0.0,tan(0.5 * semiperim) * tan(0.5 * (semiperim - ab)) &
-                     * tan(0.5 * (semiperim - bc)) * tan(0.5 * (semiperim - ca))))
+      tanqe = sqrt(max(0.0, tan(0.5*semiperim)*tan(0.5*(semiperim - ab)) &
+                       *tan(0.5*(semiperim - bc))*tan(0.5*(semiperim - ca))))
 
-        mpas_triangle_signed_area_sphere = 4.0 * radius * radius * atan(tanqe)
+      mpas_triangle_signed_area_sphere = 4.0*radius*radius*atan(tanqe)
 
-        ! computing correct signs (in similar fashion to mpas_sphere_angle)
-        ablen(1) = b(1) - a(1)
-        ablen(2) = b(2) - a(2)
-        ablen(3) = b(3) - a(3)
+      ! computing correct signs (in similar fashion to mpas_sphere_angle)
+      ablen(1) = b(1) - a(1)
+      ablen(2) = b(2) - a(2)
+      ablen(3) = b(3) - a(3)
 
-        aclen(1) = c(1) - a(1)
-        aclen(2) = c(2) - a(2)
-        aclen(3) = c(3) - a(3)
+      aclen(1) = c(1) - a(1)
+      aclen(2) = c(2) - a(2)
+      aclen(3) = c(3) - a(3)
 
-        dlen(1) =   (ablen(2) * aclen(3)) - (ablen(3) * aclen(2))
-        dlen(2) = -((ablen(1) * aclen(3)) - (ablen(3) * aclen(1)))
-        dlen(3) =   (ablen(1) * aclen(2)) - (ablen(2) * aclen(1))
+      dlen(1) = (ablen(2)*aclen(3)) - (ablen(3)*aclen(2))
+      dlen(2) = -((ablen(1)*aclen(3)) - (ablen(3)*aclen(1)))
+      dlen(3) = (ablen(1)*aclen(2)) - (ablen(2)*aclen(1))
 
-        if ((Dlen(1)*a(1) + Dlen(2)*a(2) + Dlen(3)*a(3)) < 0.0) then
-            mpas_triangle_signed_area_sphere = -mpas_triangle_signed_area_sphere
-        end if
+      if ((Dlen(1)*a(1) + Dlen(2)*a(2) + Dlen(3)*a(3)) < 0.0) then
+         mpas_triangle_signed_area_sphere = -mpas_triangle_signed_area_sphere
+      end if
 
-    end function mpas_triangle_signed_area_sphere
-
+   end function mpas_triangle_signed_area_sphere
 
     !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-    ! FUNCTION MPAS_ARC_LENGTH
-    !
-    ! Returns the length of the great circle arc from A=(ax, ay, az) to
-    !    B=(bx, by, bz). It is assumed that both A and B lie on the surface of the
-    !    same sphere centered at the origin.
+   ! FUNCTION MPAS_ARC_LENGTH
+   !
+   ! Returns the length of the great circle arc from A=(ax, ay, az) to
+   !    B=(bx, by, bz). It is assumed that both A and B lie on the surface of the
+   !    same sphere centered at the origin.
     !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-    real function mpas_arc_length(ax, ay, az, bx, by, bz)
+   real function mpas_arc_length(ax, ay, az, bx, by, bz)
 
-        implicit none
+      implicit none
 
-        real, intent(in) :: ax, ay, az, bx, by, bz
+      real, intent(in) :: ax, ay, az, bx, by, bz
 
-        real :: r, c
-        real :: cx, cy, cz
+      real :: r, c
+      real :: cx, cy, cz
 
-        cx = bx - ax
-        cy = by - ay
-        cz = bz - az
+      cx = bx - ax
+      cy = by - ay
+      cz = bz - az
 
-        r = sqrt(ax*ax + ay*ay + az*az)
-        c = sqrt(cx*cx + cy*cy + cz*cz)
+      r = sqrt(ax*ax + ay*ay + az*az)
+      c = sqrt(cx*cx + cy*cy + cz*cz)
 
-        mpas_arc_length = r * 2.0 * asin(c/(2.0*r))
+      mpas_arc_length = r*2.0*asin(c/(2.0*r))
 
-    end function mpas_arc_length
+   end function mpas_arc_length
 
+   function convert_lx(lat, lon, radius) result(vec)
 
-    function convert_lx(lat, lon, radius) result(vec)
+      implicit none
 
-        implicit none
+      real, intent(in) :: lat, lon, radius
 
-        real, intent(in) :: lat, lon, radius
+      real, dimension(3) :: vec
 
-        real, dimension(3) :: vec
+      vec(1) = radius*cos(lon)*cos(lat)
+      vec(2) = radius*sin(lon)*cos(lat)
+      vec(3) = radius*sin(lat)
 
-        vec(1) = radius * cos(lon) * cos(lat)
-        vec(2) = radius * sin(lon) * cos(lat)
-        vec(3) = radius * sin(lat)
+   end function convert_lx
 
-    end function convert_lx
+   function index2d(irank, idx) result(i)
 
+      implicit none
 
-    function index2d(irank, idx) result(i)
+      integer, intent(in) :: irank, idx
 
-        implicit none
+      integer :: i
 
-        integer, intent(in) :: irank, idx
+      i = irank*(idx - 1) + 1
 
-        integer :: i
-
-        i = irank * (idx - 1) + 1
-
-    end function index2d
-
+   end function index2d
 
 !-----------------------------------------------------------------------
 !  routine interior_element
@@ -1728,65 +1686,64 @@ module remapper
 !>  a value of 0 is returned.
 !
 !-----------------------------------------------------------------------
-    integer function interior_element(neighborsOnElement, nNeighbors, nNeighborsConstant)
+   integer function interior_element(neighborsOnElement, nNeighbors, nNeighborsConstant)
 
-        implicit none
+      implicit none
 
-        integer, dimension(:,:), intent(in) :: neighborsOnElement
-        integer, dimension(:), intent(in), optional :: nNeighbors
-        integer, intent(in), optional :: nNeighborsConstant
+      integer, dimension(:, :), intent(in) :: neighborsOnElement
+      integer, dimension(:), intent(in), optional :: nNeighbors
+      integer, intent(in), optional :: nNeighborsConstant
 
-        integer :: i, j
+      integer :: i, j
 
-        interior_element = 0
+      interior_element = 0
 
-        !
-        ! Each element has a variable number of neighbors
-        !
-        if (present(nNeighbors)) then
+      !
+      ! Each element has a variable number of neighbors
+      !
+      if (present(nNeighbors)) then
 
-            ELEMENT_LOOP1: do i=1,size(neighborsOnElement, dim=2)
+         ELEMENT_LOOP1: do i = 1, size(neighborsOnElement, dim=2)
 
-                ! Scan neighbors of element i
-                do j=1,nNeighbors(i)
+            ! Scan neighbors of element i
+            do j = 1, nNeighbors(i)
 
-                    ! If a zero-index neighbor was found, cycle to the next element
-                    if (neighborsOnElement(j,i) == 0) then
-                        cycle ELEMENT_LOOP1
-                    end if
-                end do
+               ! If a zero-index neighbor was found, cycle to the next element
+               if (neighborsOnElement(j, i) == 0) then
+                  cycle ELEMENT_LOOP1
+               end if
+            end do
 
-                ! If we reach this point, no zero-index neighbors were found
-                interior_element = i
-                return
+            ! If we reach this point, no zero-index neighbors were found
+            interior_element = i
+            return
 
-            end do ELEMENT_LOOP1
+         end do ELEMENT_LOOP1
 
-        !
-        ! Each element has a constant number of neighbors
-        !
-        else if (present(nNeighborsConstant)) then
+         !
+         ! Each element has a constant number of neighbors
+         !
+      else if (present(nNeighborsConstant)) then
 
-            ELEMENT_LOOP2: do i=1,size(neighborsOnElement, dim=2)
+         ELEMENT_LOOP2: do i = 1, size(neighborsOnElement, dim=2)
 
-                ! Scan neighbors of element i
-                do j=1,nNeighborsConstant
+            ! Scan neighbors of element i
+            do j = 1, nNeighborsConstant
 
-                    ! If a zero-index neighbor was found, cycle to the next element
-                    if (neighborsOnElement(j,i) == 0) then
-                        cycle ELEMENT_LOOP2
-                    end if
-                end do
+               ! If a zero-index neighbor was found, cycle to the next element
+               if (neighborsOnElement(j, i) == 0) then
+                  cycle ELEMENT_LOOP2
+               end if
+            end do
 
-                ! If we reach this point, no zero-index neighbors were found
-                interior_element = i
-                return
+            ! If we reach this point, no zero-index neighbors were found
+            interior_element = i
+            return
 
-            end do ELEMENT_LOOP2
-        end if
+         end do ELEMENT_LOOP2
+      end if
 
-    end function interior_element
-
+   end function interior_element
 
 !-----------------------------------------------------------------------
 !  routine field_class
@@ -1799,83 +1756,82 @@ module remapper
 !>  or with CAM-MPAS output.
 !
 !-----------------------------------------------------------------------
-    integer function field_class(dimnames)
+   integer function field_class(dimnames)
 
-        implicit none
+      implicit none
 
-        character(len=*), dimension(:), intent(in) :: dimnames
+      character(len=*), dimension(:), intent(in) :: dimnames
 
-        integer :: decompDim
+      integer :: decompDim
 
+      field_class = UNSUPPORTED_FIELD
 
-        field_class = UNSUPPORTED_FIELD
+      !
+      ! Begin by checking the names of the right-most dimension
+      !
+      decompDim = size(dimnames)
 
-        !
-        ! Begin by checking the names of the right-most dimension
-        !
-        decompDim = size(dimnames)
+      ! If this field has no dimensions, remapping is not supported
+      if (decompDim == 0) then
+         return
+      end if
 
-        ! If this field has no dimensions, remapping is not supported
-        if (decompDim == 0) then
-            return
-        end if
+      !
+      ! If right-most dimension is a record dimension, move one
+      ! dimension to the left
+      !
+      if (trim(dimnames(decompDim)) == 'Time') then
+         decompDim = decompDim - 1
+      end if
 
-        !
-        ! If right-most dimension is a record dimension, move one
-        ! dimension to the left
-        !
-        if (trim(dimnames(decompDim)) == 'Time') then
-            decompDim = decompDim - 1
-        end if
+      ! If the record dimension was the only dimension, this field
+      ! is not supported for remapping
+      if (decompDim <= 0) then
+         return
+      end if
 
-        ! If the record dimension was the only dimension, this field
-        ! is not supported for remapping
-        if (decompDim <= 0) then
-            return
-        end if
+      select case (trim(dimnames(decompDim)))
 
-        select case (trim(dimnames(decompDim)))
+      case ('nCells')
+         field_class = MPAS_CELL_FIELD
+         return
 
-            case ('nCells')
-                field_class = MPAS_CELL_FIELD
-                return
+      case ('nVertices')
+         field_class = MPAS_VTX_FIELD
+         return
 
-            case ('nVertices')
-                field_class = MPAS_VTX_FIELD
-                return
+      case ('nEdges')
+         field_class = MPAS_EDGE_FIELD
+         return
 
-            case ('nEdges')
-                field_class = MPAS_EDGE_FIELD
-                return
+      end select
 
-        end select
+      !
+      ! If the right-most dimension did not match any supported
+      ! dimension, try the left-most dimension
+      !
+      decompDim = 1
 
-        !
-        ! If the right-most dimension did not match any supported
-        ! dimension, try the left-most dimension
-        !
-        decompDim = 1
+      select case (trim(dimnames(decompDim)))
 
-        select case (trim(dimnames(decompDim)))
+      case ('nCells')
+         field_class = CAM_CELL_FIELD
+         return
 
-            case ('nCells')
-                field_class = CAM_CELL_FIELD
-                return
+      case ('ncol')
+         field_class = CAM_CELL_FIELD
+         return
 
-            case ('ncol')
-                field_class = CAM_CELL_FIELD
-                return
+      case ('nVertices')
+         field_class = CAM_VTX_FIELD
+         return
 
-            case ('nVertices')
-                field_class = CAM_VTX_FIELD
-                return
+      case ('nEdges')
+         field_class = CAM_EDGE_FIELD
+         return
 
-            case ('nEdges')
-                field_class = CAM_EDGE_FIELD
-                return
+      end select
 
-        end select
-
-    end function field_class
+   end function field_class
 
 end module remapper
