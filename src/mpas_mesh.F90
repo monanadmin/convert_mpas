@@ -8,7 +8,10 @@ module mpas_mesh
         integer :: nVertices = 0
         integer :: nEdges = 0
         integer :: maxEdges = 0
+	integer :: nVertLevels=0
+	integer :: nVertLevelsP1=0
         integer, dimension(:), pointer :: nEdgesOnCell => null()
+        integer, dimension(:), pointer :: nVertLevelsCell => null()
         integer, dimension(:,:), pointer :: cellsOnCell => null()
         integer, dimension(:,:), pointer :: verticesOnCell => null()
         integer, dimension(:,:), pointer :: cellsOnVertex => null()
@@ -35,7 +38,7 @@ module mpas_mesh
 
         type (input_handle_type) :: handle
         type (input_field_type) :: field
-
+        integer :: k
         stat = 0
 
         if (scan_input_open(mesh_filename, handle) /= 0) then
@@ -231,6 +234,25 @@ module mpas_mesh
         end if
         stat = scan_input_free_field(field)
  
+        !
+        ! zgrid
+        !
+        if (scan_input_for_field(handle, 'zgrid', field) /= 0) then
+            stat = 1
+            return
+        end if
+
+        mesh % nVertLevelsP1 = field % dimlens(2)
+        mesh % nVertLevels = mesh % nVertLevelsP1-1
+
+        stat = scan_input_read_field(field)
+        allocate(mesh % nVertLevelsCell(mesh % nVertLevelsP1))
+        do k=1,mesh % nVertLevelsP1        
+           mesh % nVertLevelsCell(k) = mesh % nVertLevelsP1 + 1 - k 
+        end do
+        stat = scan_input_free_field(field)
+
+
         stat = scan_input_close(handle)
 
         mesh % valid = .true.

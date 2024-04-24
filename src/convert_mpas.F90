@@ -18,7 +18,7 @@ program convert_mpas
                          write_timer
 
     integer :: stat
-    character (len=1024) :: mesh_filename, data_filename
+    character (len=1024) :: mesh_filename, data_filename,Time_Label,filename
     type (mpas_mesh_type) :: source_mesh
     type (target_mesh_type) :: destination_mesh
     type (input_handle_type) :: handle
@@ -28,11 +28,18 @@ program convert_mpas
     type (target_field_type) :: target_field
     type (field_list_type) :: include_field_list, exclude_field_list
 
-    integer :: iRec
+    integer :: iRec,ios
     integer :: nRecordsIn, nRecordsOut
     integer :: iFile
     integer :: fileArgStart, nArgs
-    
+    logical :: exists        
+    integer :: nVertLevels  = 55
+    integer :: nOznLevels   = 59
+    integer :: nMonths      = 12
+    integer :: nSoilLevels  =  4
+    integer :: nIsobaricLev = 27
+    character (len=20) :: verticalCoord=''
+    NAMELIST /config_convert_mpas/ verticalCoord,nVertLevels,nOznLevels,nMonths,nSoilLevels,nIsobaricLev
 
     call timer_start(total_timer)
 
@@ -60,10 +67,41 @@ program convert_mpas
     end if
 
     write(0,*) 'Reading MPAS mesh information from file '''//trim(mesh_filename)//''''
+   
+    inquire(file='convert_mpas.nml', exist=exists)
+    if (exists) then
+       write(0,*) ' '
+       write(0,*) 'Reading target convert_mpas.nml specification from file ''configuration'''
 
-
+       open (unit=51, file='./convert_mpas.nml', &
+         form='formatted', access='sequential', &
+         action='read', status='old', iostat=ios)
+       if (ios /= 0) then
+          write (unit=0, fmt='(3a,i4)') &
+            ' ** (error) ** open file ', &
+              './'//'./convert_mpas.nml', &
+            ' returned iostat = ', ios
+          stop  ' ** (error 1) **'
+       end if
+       read  (unit=51, nml=config_convert_mpas)
+       close (unit=51)
+       write(0,*) 'need convert_mpas.nml file '
+       write (unit=0, fmt='(/,a)')  ' &config_convert_mpas'
+       write (unit=0, fmt='(a,a12)') '    verticalCoord = ', 'MPAS_Model'   !  'Pressure'
+       write (unit=0, fmt='(a,/)')  ' /'
+    else
+       write(0,*) ' '
+       write(0,*) 'need convert_mpas.nml file '
+       write (unit=0, fmt='(/,a)')  ' &config_convert_mpas'
+       write (unit=0, fmt='(a,a12)') '    verticalCoord = ', 'MPAS_Model'   !  'Pressure'
+       write (unit=0, fmt='(a,/)')  ' /'
+       stop  ' ** (error 2) **'
+    endif 
     !
-    ! Generate the target grid
+    ! Generate the target grid  target_mesh_setup
+    !
+    ! Try to parse nLat, nLon from target_domain file
+    !
     !
     if (target_mesh_setup(destination_mesh) /= 0) then
         write(0,*) 'Error: Problems setting up target mesh'
@@ -71,14 +109,13 @@ program convert_mpas
     end if
 
     !
-    ! Get information defining the MPAS mesh
+    ! Get information defining the MPAS mesh cellsOnCell
     !
     if (mpas_mesh_setup(mesh_filename, source_mesh) /= 0) then
         write(0,*) 'Error: Problems setting up MPAS mesh from file '//trim(mesh_filename)
         stat = target_mesh_free(destination_mesh)
         stop 3
     end if
-
     !
     ! Compute weights for mapping from MPAS mesh to target grid
     !
@@ -121,9 +158,35 @@ program convert_mpas
     ! Loop over input data files
     !
     do iFile=fileArgStart,nArgs
-        call get_command_argument(iFile, data_filename)
-        write(0,*) 'Remapping MPAS fields from file '''//trim(data_filename)//''''
 
+        call get_command_argument(iFile, data_filename)
+
+        write(0,*) 'Remapping MPAS fields from file '''//trim(data_filename)//''''
+        write(0,*) 'from file '''//data_filename(1:4)//''''
+        filename=get_filename(data_filename)
+        if(trim(filename(1:4)) == 'diag')then
+        write(0,*) ' MPAS fields from file '''//data_filename(1:4)//''''
+           Time_Label='hours since 2021-01-01 00:00:00'
+           Time_Label(13:16)=filename(6:9)
+           Time_Label(18:19)=filename(11:12)
+           Time_Label(21:22)=filename(14:15)
+           Time_Label(24:25)=filename(17:18)
+           Time_Label(27:28)=filename(20:21)
+           Time_Label(30:31)=filename(23:24)
+        else if(trim(filename(1:7)) == 'history')then
+        write(0,*) ' MPAS fields from file '''//data_filename(1:7)//''''
+           Time_Label='hours since 2021-01-01 00:00:00'
+           Time_Label(13:16)=filename(9:12)
+           Time_Label(18:19)=filename(14:15)
+           Time_Label(21:22)=filename(17:18)
+           Time_Label(24:25)=filename(20:21)
+           Time_Label(27:28)=filename(23:24)
+           Time_Label(30:31)=filename(26:27)
+        else           
+	   Time_Label='hours since 2021-01-01 00:00:00'
+           write(0,*) 'Error: Problems opening input file pk=>'//trim(data_filename)
+           stop
+        endif
         !
         ! Open input data file
         !
@@ -140,8 +203,8 @@ program convert_mpas
     
         write(0,*) 'Input file has ', nRecordsIn, ' records'
     
-! generally, we should make sure dimensions match in existing output files
-! and in subsequent MPAS input files
+        ! generally, we should make sure dimensions match in existing output files
+        ! and in subsequent MPAS input files
     
         !
         ! Scan through input file, determine which fields will be remapped,
@@ -163,10 +226,39 @@ program convert_mpas
             stat = free_target_field(target_field)
 
 
+            if(TRIM(verticalCoord) == 'Pressure')then
+               stat = remap_get_target_t_iso_levels(remap_info, target_field,nIsobaricLev)
+               stat = file_output_register_field(output_handle, target_field)
+               stat = free_target_field(target_field)
+
+               stat = remap_get_target_u_iso_levels(remap_info, target_field,nIsobaricLev)
+               stat = file_output_register_field(output_handle, target_field)
+               stat = free_target_field(target_field)
+            else if(TRIM(verticalCoord) == 'MPAS_Model')then   
+               stat = remap_get_target_nVertLevels(remap_info, target_field,nVertLevels)
+               stat = file_output_register_field  (output_handle, target_field)
+               stat = free_target_field(target_field)
+            else
+               write(0,*) 'error at verticalCoord=',TRIM(verticalCoord)
+               stop 66
+            endif
+
+            stat = remap_get_target_time(remap_info, target_field)
+            stat = file_output_register_field(output_handle, target_field)
+            stat = free_target_field(target_field)
+
             do while (scan_input_next_field(handle, field) == 0) 
                 if (can_remap_field(field) .and. &
                     should_remap_field(field, include_field_list, exclude_field_list)) then
-                    stat = remap_field_dryrun(remap_info, field, target_field)
+                    if(TRIM(verticalCoord) == 'Pressure')then
+                       stat = remap_field_dryrun(nIsobaricLev,nOznLevels,nSoilLevels,remap_info, field, target_field)
+                    else if(TRIM(verticalCoord) == 'MPAS_Model')then
+                       stat = remap_field_dryrun(nVertLevels,nOznLevels,nSoilLevels,remap_info, field, target_field)
+                    else
+                       write(0,*) 'error at verticalCoord=',TRIM(verticalCoord)
+                       stop 44
+                    endif
+
                     stat = file_output_register_field(output_handle, target_field)
                     stat = copy_field_atts(handle, field, output_handle, target_field)
                     if (stat /= 0) then
@@ -197,9 +289,42 @@ program convert_mpas
             stat = file_output_write_field(output_handle, target_field, frame=0)
             stat = free_target_field(target_field)
 
+            if(TRIM(verticalCoord) == 'Pressure')then
+               stat = remap_get_target_t_iso_levels(remap_info, target_field,nIsobaricLev)
+               stat = file_output_register_field(output_handle, target_field)
+               stat = free_target_field(target_field)
+
+               stat = remap_get_target_u_iso_levels(remap_info, target_field,nIsobaricLev)
+               stat = file_output_register_field(output_handle, target_field)
+               stat = free_target_field(target_field)
+
+            else if(TRIM(verticalCoord) == 'MPAS_Model')then   
+               stat = remap_get_target_nVertLevels(remap_info, target_field,nVertLevels)
+               stat = file_output_register_field(output_handle, target_field)
+               stat = free_target_field(target_field)
+
+            else
+               write(0,*) 'error at verticalCoord=',TRIM(verticalCoord)
+               stop 66
+            endif
+
+            stat = remap_get_target_time(remap_info, target_field)
+            stat = file_output_register_field(output_handle, target_field)
+            stat = free_target_field(target_field)
+
             ! Add units, long_name, standard_name attribute to coordinate variables.
             stat = add_latlon_atts(output_handle)
-    
+
+
+            if(TRIM(verticalCoord) == 'Pressure')then
+	       stat = add_zlevels_atts(output_handle)
+            else if(TRIM(verticalCoord) == 'MPAS_Model')then   
+	       stat = add_zlevels_model_atts(output_handle)
+            else
+               write(0,*) 'error at verticalCoord=',TRIM(verticalCoord)
+               stop 66
+            endif
+            stat = add_time_atts(output_handle,Time_Label)
         end if
 
 
@@ -213,6 +338,21 @@ program convert_mpas
             ! Scan through list of fields in the input file, remapping fields and writing
             ! them to the output file
             !
+            if(TRIM(verticalCoord) == 'MPAS_Model')then   
+        
+	            call timer_start(remap_timer)
+                    stat = remap_field1DM(nVertLevels,remap_info, target_field)
+                    call timer_stop(remap_timer)
+                    write(0,'(a,f10.6,a)') '    remap: ', timer_time(remap_timer), ' s'
+ 
+                    call timer_start(write_timer)
+                    stat = file_output_write_field(output_handle, target_field, frame=(nRecordsOut+iRec))
+                    call timer_stop(write_timer)
+                    write(0,'(a,f10.6,a)') '    write: ', timer_time(write_timer), ' s'
+                    stat = free_target_field(target_field)
+
+            endif
+
             do while (scan_input_next_field(handle, field) == 0) 
                 if (can_remap_field(field) .and. &
                     should_remap_field(field, include_field_list, exclude_field_list)) then
@@ -234,6 +374,46 @@ program convert_mpas
                     write(0,'(a,f10.6,a)') '    write: ', timer_time(write_timer), ' s'
     
                     stat = free_target_field(target_field)
+                else if ((trim(field % name) == 't_iso_levels' .or. trim(field % name) == 'z_iso_levels' &
+		    .or. trim(field % name) == 'u_iso_levels') .and. TRIM(verticalCoord) == 'Pressure')then
+                    write(0,*) 'No remapping field '//trim(field % name)//', frame ', irec
+    
+                    call timer_start(read_timer)
+                    stat = scan_input_read_field(field, frame=iRec)
+                    call timer_stop(read_timer)
+                    write(0,'(a,f10.6,a)') '    read: ', timer_time(read_timer), ' s'
+        
+	            call timer_start(remap_timer)
+                    stat = remap_field1D(verticalCoord,remap_info, field, target_field)
+                    call timer_stop(remap_timer)
+                    write(0,'(a,f10.6,a)') '    remap: ', timer_time(remap_timer), ' s'
+ 
+                    call timer_start(write_timer)
+                    stat = file_output_write_field(output_handle, target_field, frame=(nRecordsOut+iRec))
+                    call timer_stop(write_timer)
+                    write(0,'(a,f10.6,a)') '    write: ', timer_time(write_timer), ' s'
+                    stat = free_target_field(target_field)
+
+
+                else if (trim(field % name) == 'xtime' )then
+                    write(0,*) 'No remapping field '//trim(field % name)//', frame ', irec
+    
+                    call timer_start(read_timer)
+                    stat = scan_input_read_field(field, frame=iRec)
+                    call timer_stop(read_timer)
+                    write(0,'(a,f10.6,a)') '    read: ', timer_time(read_timer), ' s'
+        
+	            call timer_start(remap_timer)
+                    stat = remap_fieldTime(remap_info, field, target_field)
+                    call timer_stop(remap_timer)
+                    write(0,'(a,f10.6,a)') '    remap: ', timer_time(remap_timer), ' s'
+ 
+                    call timer_start(write_timer)
+                    stat = file_output_write_field(output_handle, target_field, frame=(nRecordsOut+iRec))
+                    call timer_stop(write_timer)
+                    write(0,'(a,f10.6,a)') '    write: ', timer_time(write_timer), ' s'
+                    stat = free_target_field(target_field)
+
                 end if
                 stat = scan_input_free_field(field)
             end do
@@ -261,5 +441,50 @@ program convert_mpas
     write(0,*) ' '
 
     stop
+contains
+ function get_filename(full_filename) result(filename)
+    implicit none
+    character(len=*), INTENT(in) :: full_filename
+    character(len=1000) :: path, directory, extension
+    character(len=1000) :: filename
 
+    integer :: i
+    ! Encontre a última barra no caminho
+    directory = ''    
+    do i = len(full_filename), 1, -1
+        if (full_filename(i:i) .eq. '/') then
+            directory = full_filename(1:i)
+            filename  = ''
+	    exit
+        else 
+            directory = './'
+	    filename  = trim(full_filename)
+        endif
+    enddo
+    if( trim(filename) == trim(full_filename))return
+
+    ! Se não encontrou a barra, o diretório é vazio
+    if (directory .eq. '') then
+        directory = './'
+    endif
+
+    ! Extrair o nome do arquivo e a extensão
+    extension = ''
+    do i = len(full_filename), 1, -1
+        if (full_filename(i:i) .eq. '.') then
+            extension = full_filename(i+1:)
+            exit
+        endif
+    enddo
+    ! Extrair o nome do arquivo e a extensão
+    filename = ''
+    do i = len(full_filename), 1, -1
+        if (full_filename(i:i) .eq. '/') then
+            filename  = full_filename(i+1:)
+            exit
+        endif
+    enddo
+
+
+end function get_filename
 end program convert_mpas

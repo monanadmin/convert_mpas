@@ -76,12 +76,80 @@ module copy_atts
         stat = NF90_PUT_ATT(handle % ncid, varid, 'units', 'degree_north')
         stat = NF90_PUT_ATT(handle % ncid, varid, 'long_name', 'latitude')
         stat = NF90_PUT_ATT(handle % ncid, varid, 'standard_name', 'latitude')
+        stat = NF90_PUT_ATT(handle % ncid, varid, 'axis', 'Y')
 
         stat = NF90_INQ_VARID(handle%ncid, 'longitude', varid)
         stat = NF90_PUT_ATT(handle % ncid, varid, 'units', 'degree_east')
         stat = NF90_PUT_ATT(handle % ncid, varid, 'long_name', 'longitude')
         stat = NF90_PUT_ATT(handle % ncid, varid, 'standard_name', 'longitude')
+        stat = NF90_PUT_ATT(handle % ncid, varid, 'axis', 'X')
 
     end function add_latlon_atts
+
+    ! Add attributes to lat or lon field
+    integer function add_time_atts(handle,Time_Label) result(stat)
+
+        implicit none
+
+        type (output_handle_type) :: handle
+        CHARACTER(LEN=*), intent(in) :: Time_Label
+        integer :: varid
+
+        stat = 0
+
+        stat = NF90_INQ_VARID(handle%ncid, 'Time', varid)
+        stat = NF90_PUT_ATT(handle % ncid, varid, 'units', TRIM(Time_Label))
+        stat = NF90_PUT_ATT(handle % ncid, varid, 'calendar', 'proleptic_gregorian')
+        stat = NF90_PUT_ATT(handle % ncid, varid, 'standard_name', 'time')
+        stat = NF90_PUT_ATT(handle % ncid, varid, 'axis', 'T')
+
+
+    end function add_time_atts
+
+    ! Add attributes to lat or lon field
+    integer function add_zlevels_atts(handle) result(stat)
+
+        implicit none
+
+        type (output_handle_type) :: handle
+
+        integer :: varid
+
+        stat = 0
+
+        stat = NF90_INQ_VARID(handle%ncid, 'level', varid)
+        stat = NF90_PUT_ATT(handle % ncid, varid, 'standard_name', 'air_pressure')
+        stat = NF90_PUT_ATT(handle % ncid, varid, 'long_name', 'Levels for vertical interpolation of winds to isobaric surfaces')
+        stat = NF90_PUT_ATT(handle % ncid, varid, 'units', 'Pa')
+        stat = NF90_PUT_ATT(handle % ncid, varid, 'positive', 'down')
+        stat = NF90_PUT_ATT(handle % ncid, varid, 'axis', 'Z')
+
+        !stat = NF90_INQ_VARID(handle%ncid, 'u_iso_levels', varid)
+        !stat = NF90_PUT_ATT(handle % ncid, varid, 'axis', 'Z')
+
+        !stat = NF90_INQ_VARID(handle%ncid, 'z_iso_levels', varid)
+        !stat = NF90_PUT_ATT(handle % ncid, varid, 'axis', 'Z')
+
+    end function add_zlevels_atts
+
+    ! Add attributes to lat or lon field
+    integer function add_zlevels_model_atts(handle) result(stat)
+
+        implicit none
+
+        type (output_handle_type) :: handle
+
+        integer :: varid
+
+        stat = 0
+
+        stat = NF90_INQ_VARID(handle%ncid, 'level', varid)
+        stat = NF90_PUT_ATT(handle % ncid, varid, 'standard_name', 'index_model')
+        stat = NF90_PUT_ATT(handle % ncid, varid, 'long_name', 'Levels for vertical interpolation of winds to isobaric surfaces')
+        stat = NF90_PUT_ATT(handle % ncid, varid, 'units', 'index')
+        stat = NF90_PUT_ATT(handle % ncid, varid, 'positive', 'up')
+        stat = NF90_PUT_ATT(handle % ncid, varid, 'axis', 'Z')
+
+    end function add_zlevels_model_atts
 
 end module copy_atts

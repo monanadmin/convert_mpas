@@ -181,6 +181,7 @@ module scan_input
                                      name=field % name, &
                                      xtype=field % xtype, &
                                      ndims=field % ndims)
+
         if (stat /= NF90_NOERR) then
             stat = 1
             return
@@ -535,6 +536,7 @@ module scan_input
             write(0,*) 'Unsupported type; skipping read of field '//trim(field % name)
             write(0,*) ' '
         end if
+
 
         if (stat /= NF90_NOERR) then
             write(0,*) ' '

@@ -32,7 +32,8 @@ module file_output
         type (output_handle_type), intent(out) :: handle
         integer, intent(in), optional :: mode
         integer, intent(out), optional :: nRecords
-
+        integer  :: CACHE_SIZE = 7200000, CACHE_NELEMS = 100
+        integer  :: CACHE_PREEMPTION = 79
         integer :: local_mode
         logical :: exists
 
@@ -42,12 +43,15 @@ module file_output
         end if
 
         stat = 0
-
+        CACHE_SIZE = 720*360; CACHE_NELEMS = 720*360
         inquire(file=trim(filename), exist=exists)
 
         if ((exists .and. local_mode == FILE_MODE_CLOBBER) .or. (.not. exists)) then
 
-            stat = nf90_create(trim(filename), FILE_CMODE, handle % ncid)
+        ! Create the netCDF file.
+            stat = nf90_create(trim(filename), FILE_CMODE, handle % ncid,&
+	           cache_size = CACHE_SIZE, &
+                   cache_nelems = CACHE_NELEMS, cache_preemption = CACHE_PREEMPTION)
             if (stat /= NF90_NOERR) then
                 stat = 1
                 return
@@ -121,6 +125,7 @@ module file_output
         type (target_field_type), intent(in) :: field
 
         integer :: idim
+	integer :: chunksizes2D(2)
         integer :: varid
         integer, dimension(5) :: dimids
 
@@ -128,10 +133,12 @@ module file_output
 
         do idim=1,field % ndims
             stat = nf90_inq_dimid(handle % ncid, trim(field % dimnames(idim)), dimids(idim))
+
             if (stat /= NF90_NOERR) then
                 stat = nf90_def_dim(handle % ncid, trim(field % dimnames(idim)), field % dimlens(idim), dimids(idim))
             end if
         end do
+
         if (field % isTimeDependent) then
             dimids(idim) = handle % unlimitedID
         end if
@@ -182,14 +189,27 @@ module file_output
             else if (field % ndims == 3) then
                 if (field % isTimeDependent) then
                     stat = nf90_def_var(handle % ncid, trim(field % name), NF90_FLOAT, dimids(1:4), varid)
+                    ! Set up chunking.
+                    chunksizes2D = (/ field % dimlens(2), field % dimlens(3) /)
+                    stat = nf90_def_var_chunking(handle % ncid, varid, 0, chunksizes2D)
                 else
                     stat = nf90_def_var(handle % ncid, trim(field % name), NF90_FLOAT, dimids(1:3), varid)
+                    ! Set up chunking.
+                    chunksizes2D = (/  field % dimlens(2), field % dimlens(3) /)
+                    stat = nf90_def_var_chunking(handle % ncid, varid, 0, chunksizes2D)
                 end if
             else if (field % ndims == 4) then
                 if (field % isTimeDependent) then
                     stat = nf90_def_var(handle % ncid, trim(field % name), NF90_FLOAT, dimids(1:5), varid)
+                    ! Set up chunking.
+                    chunksizes2D = (/  field % dimlens(3), field % dimlens(4) /)
+                    stat = nf90_def_var_chunking(handle % ncid, varid, 0, chunksizes2D)
+
                 else
                     stat = nf90_def_var(handle % ncid, trim(field % name), NF90_FLOAT, dimids(1:4), varid)
+                    ! Set up chunking.
+                    chunksizes2D = (/  field % dimlens(3), field % dimlens(4) /)
+                    stat = nf90_def_var_chunking(handle % ncid, varid, 0, chunksizes2D)
                 end if
             end if
 
@@ -217,14 +237,28 @@ module file_output
             else if (field % ndims == 3) then
                 if (field % isTimeDependent) then
                     stat = nf90_def_var(handle % ncid, trim(field % name), NF90_DOUBLE, dimids(1:4), varid)
+                    ! Set up chunking.
+                    chunksizes2D = (/  field % dimlens(2), field % dimlens(3) /)
+                    stat = nf90_def_var_chunking(handle % ncid, varid, 0, chunksizes2D)
                 else
                     stat = nf90_def_var(handle % ncid, trim(field % name), NF90_DOUBLE, dimids(1:3), varid)
+                    ! Set up chunking.
+                    chunksizes2D = (/  field % dimlens(2), field % dimlens(3) /)
+                    stat = nf90_def_var_chunking(handle % ncid, varid, 0, chunksizes2D)
                 end if
             else if (field % ndims == 4) then
                 if (field % isTimeDependent) then
                     stat = nf90_def_var(handle % ncid, trim(field % name), NF90_DOUBLE, dimids(1:5), varid)
+                    ! Set up chunking.
+                    chunksizes2D = (/  field % dimlens(3), field % dimlens(4) /)
+                    stat = nf90_def_var_chunking(handle % ncid, varid, 0, chunksizes2D)
+
                 else
                     stat = nf90_def_var(handle % ncid, trim(field % name), NF90_DOUBLE, dimids(1:4), varid)
+                    ! Set up chunking.
+                    chunksizes2D = (/ field % dimlens(3), field % dimlens(4) /)
+                    stat = nf90_def_var_chunking(handle % ncid, varid, 0, chunksizes2D)
+
                 end if
             end if
 
@@ -252,8 +286,14 @@ module file_output
             else if (field % ndims == 3) then
                 if (field % isTimeDependent) then
                     stat = nf90_def_var(handle % ncid, trim(field % name), NF90_INT, dimids(1:4), varid)
+                    ! Set up chunking.
+                    chunksizes2D = (/ field % dimlens(2), field % dimlens(3) /)
+                    stat = nf90_def_var_chunking(handle % ncid, varid, 0, chunksizes2D)
                 else
                     stat = nf90_def_var(handle % ncid, trim(field % name), NF90_INT, dimids(1:3), varid)
+                    ! Set up chunking.
+                    chunksizes2D = (/  field % dimlens(2), field % dimlens(3) /)
+                    stat = nf90_def_var_chunking(handle % ncid, varid, 0, chunksizes2D)
                 end if
             end if
 
@@ -301,7 +341,6 @@ module file_output
         if (present(frame)) then
             local_frame = frame
         end if
-
         if (handle % inDefineMode) then
             stat = nf90_enddef(handle % ncid)
             if (stat /= NF90_NOERR) then
@@ -310,6 +349,42 @@ module file_output
             end if
             handle % inDefineMode = .false.
         end if
+        if (field % xtype == FIELD_TYPE_CHARACTER .and. trim(field % name) == 'xtime') then
+           field % name='Time'
+           field % isTimeDependent=.false.
+        endif
+        if (field % xtype == FIELD_TYPE_REAL .and. trim(field % name) == 't_iso_levels') then
+           field % name='level'
+           field % isTimeDependent=.false.
+        endif
+        if (field % xtype == FIELD_TYPE_DOUBLE .and. trim(field % name) == 't_iso_levels') then
+           field % name='level'
+           field % isTimeDependent=.false.
+        endif
+        if (field % xtype == FIELD_TYPE_REAL .and. trim(field % name) == 'u_iso_levels') then
+           field % name='level'
+           field % isTimeDependent=.false.
+        endif
+        if (field % xtype == FIELD_TYPE_DOUBLE .and. trim(field % name) == 'u_iso_levels') then
+           field % name='level'
+           field % isTimeDependent=.false.
+        endif
+        if (field % xtype == FIELD_TYPE_REAL .and. trim(field % name) == 'z_iso_levels') then
+           field % name='level'
+           field % isTimeDependent=.false.
+        endif
+        if (field % xtype == FIELD_TYPE_DOUBLE .and. trim(field % name) == 'z_iso_levels') then
+           field % name='level'
+           field % isTimeDependent=.false.
+        endif
+        if (field % xtype == FIELD_TYPE_REAL .and. trim(field % name) == 'level') then
+           field % name='level'
+           field % isTimeDependent=.false.
+        endif
+        if (field % xtype == FIELD_TYPE_DOUBLE .and. trim(field % name) == 'level') then
+           field % name='level'
+           field % isTimeDependent=.false.
+        endif
 
         stat = nf90_inq_varid(handle % ncid, trim(field % name), varid)
         if (stat /= NF90_NOERR) then
@@ -317,7 +392,21 @@ module file_output
             return
         end if
 
-        if (field % xtype == FIELD_TYPE_REAL) then
+        if (field % xtype == FIELD_TYPE_CHARACTER .and. trim(field % name) == 'Time') then
+             if (field % ndims == 2) then
+                if (field % isTimeDependent) then
+                    start(1) = 1
+                    count(1) = field % dimlens(1)
+                    start(2) = local_frame
+                    count(2) = 1
+                    stat = nf90_put_var(handle % ncid, varid, field % array1d, &
+                                        start=start(1:2), count=count(1:2))
+
+                else
+                    stat = nf90_put_var(handle % ncid, varid, field % array1d)
+                end if
+            endif
+        else if (field % xtype == FIELD_TYPE_REAL) then
             if (field % ndims == 0) then
                 if (field % isTimeDependent) then
                     start(1) = local_frame
@@ -335,8 +424,12 @@ module file_output
                     count(2) = 1
                     stat = nf90_put_var(handle % ncid, varid, field % array1r, &
                                         start=start(1:2), count=count(1:2))
-                else
+                    if (trim(field % name) == 'level')print*,'single1',trim(field % name), field % array1r
+                
+		else
                     stat = nf90_put_var(handle % ncid, varid, field % array1r)
+                    if (trim(field % name) == 'level')print*,'single2',trim(field % name), field % array1r
+
                 end if
             else if (field % ndims == 2) then
                 if (field % isTimeDependent) then
@@ -402,8 +495,12 @@ module file_output
                     count(2) = 1
                     stat = nf90_put_var(handle % ncid, varid, field % array1d, &
                                         start=start(1:2), count=count(1:2))
+                    if (trim(field % name) == 'level')print*,'double',trim(field % name), field % array1r
+
                 else
                     stat = nf90_put_var(handle % ncid, varid, field % array1d)
+                    if (trim(field % name) == 'level')print*,'double',trim(field % name), field % array1r
+
                 end if
             else if (field % ndims == 2) then
                 if (field % isTimeDependent) then
