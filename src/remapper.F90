@@ -114,7 +114,7 @@ contains
       do iy = 1, dst_mesh%nlat
          do ix = 1, dst_mesh%nlon
             idx = nearest_cell(dst_mesh%lats(index2d(irank, ix), iy), dst_mesh%lons(ix, index2d(irank, iy)), last_idx &
-                            , src_mesh%nCells, src_mesh%maxEdges, src_mesh%nEdgesOnCell, src_mesh% &
+                            , src_mesh%nCells, src_mesh%maxEdges, src_mesh%nEdgesOnCell, src_mesh%cellsOnCell &
                             , src_mesh%latCell, src_mesh%lonCell)
             if (idx <= 0) then
                remap_info%nearestCell(ix, iy) = 0
@@ -169,9 +169,9 @@ contains
       do iy = 1, dst_mesh%nlat
          do ix = 1, dst_mesh%nlon
             idx = nearest_vertex(dst_mesh%lats(index2d(irank, ix), iy), dst_mesh%lons(ix, index2d(irank, iy)), last_idx &
-                              , src_mesh%nCells, src_mesh%nVertices, src_mesh%maxEdges, 3, src_mesh% &
-                              , src_mesh%verticesOnCell,src_mesh%cellsOnVertex, src_mesh%latCell, src_mesh%lonCell &
-                              , src_mesh%latVertex, src_mesh%lonVertex)
+                  , src_mesh%nCells, src_mesh%nVertices, src_mesh%maxEdges, 3, src_mesh%nEdgesOnCell &
+                  , src_mesh%verticesOnCell,src_mesh%cellsOnVertex, src_mesh%latCell, src_mesh%lonCell &
+                  , src_mesh%latVertex, src_mesh%lonVertex)
 
             if (idx <= 0) then
                remap_info%sourceCells(:, ix, iy) = 1
@@ -244,7 +244,7 @@ contains
             else
                nn = src_mesh%nEdgesOnCell(idx)
                remap_info%sourceEdges(:, ix, iy) = 1
-               %sourceEdges(1:nn, ix, iy) = src_mesh%edgesOnCell(1:nn, idx)
+               remap_info%sourceEdges(1:nn, ix, iy) = src_mesh%edgesOnCell(1:nn, idx)
                pointInterp(:) = convert_lx(dst_mesh%lats(index2d(irank, ix), iy), dst_mesh%lons(ix, index2d(irank, iy)), 6371229.0)
                do j = 1, nn
                   vertCoords(:, j) = convert_lx(src_mesh%latEdge(src_mesh%edgesOnCell(j, idx)), &
