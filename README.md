@@ -34,6 +34,9 @@ The 'convert_mpas' program takes one or more command-line arguments:
   be read from the first file and fields to be remapped will be read from
   the subsequent files.
 
+It also needs namelists target_domain, for specifying domain, and 
+conver_mpas.nml, for specifying grads output parameters.
+
 All time records from input files will be processed and appended to the output 
 file, which is named 'latlon.nc'.
 
