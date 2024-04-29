@@ -1,0 +1,6 @@
+nlat = 360
+nlon = 721
+startlat = -90.
+startlon = 0.0
+endlat = 90.
+endlon = 360.0
