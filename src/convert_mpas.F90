@@ -181,6 +181,15 @@ program convert_mpas
          Time_Label(24:25) = filename(20:21)
          Time_Label(27:28) = filename(23:24)
          Time_Label(30:31) = filename(26:27)
+      else if (trim(filename(1:5)) == 'MONAN') then 
+         write (0, *) ' MPAS fields from file '''//data_filename(1:5)//''''
+         Time_Label = 'hours since 2021-01-01 00:00:00'
+         Time_Label(13:16) = filename(33:36)
+         Time_Label(18:19) = filename(37:38)
+         Time_Label(21:22) = filename(39:40)
+         Time_Label(24:25) = filename(41:42)
+         Time_Label(27:28) = filename(44:45)
+         Time_Label(30:31) = filename(47:48)
       else
          Time_Label = 'hours since 2021-01-01 00:00:00'
          write (0, *) 'Error: Problems opening input file pk=>'//trim(data_filename)

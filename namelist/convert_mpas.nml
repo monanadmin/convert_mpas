@@ -1,0 +1,8 @@
+&config_convert_mpas
+ verticalCoord = 'MPAS_Model'   !  'MPAS_Model' or 'Pressure '   
+ nVertLevels = 55
+ nOznLevels  = 59
+ nMonths     = 12
+ nSoilLevels = 4
+ nIsobaricLev= 27
+/
