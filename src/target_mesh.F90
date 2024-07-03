@@ -123,17 +123,24 @@ contains
       allocate (mesh%lats(1, mesh%nLat))
       allocate (mesh%lons(mesh%nLon, 1))
 
-      delta = (mesh%endLat - mesh%startLat)/real(mesh%nLat)
+      ! Calculate delta for latitude
+      delta = (mesh%endLat - mesh%startLat) / real(mesh%nLat - 1)
+      write (0, *) 'Delta Lat = ', delta
+      ! Generate latitude values
       do i = 0, mesh%nLat - 1
-         mesh%lats(1, i + 1) = mesh%startLat + 0.5*delta + real(i)*delta
-         mesh%lats(1, i + 1) = mesh%lats(1, i + 1)*pi_const/180.0
+         mesh%lats(1, i + 1) = mesh%startLat + real(i) * delta
+         mesh%lats(1, i + 1) = mesh%lats(1, i + 1) * pi_const / 180.0
       end do
 
-      delta = (mesh%endLon - mesh%startLon)/real(mesh%nLon)
+      ! Calculate delta for longitude
+      delta = (mesh%endLon - mesh%startLon) / real(mesh%nLon - 1)
+      write (0, *) 'Delta Lon = ', delta
+      ! Generate longitude values
       do i = 0, mesh%nLon - 1
-         mesh%lons(i + 1, 1) = mesh%startLon + 0.5*delta + real(i)*delta
-         mesh%lons(i + 1, 1) = mesh%lons(i + 1, 1)*pi_const/180.0
+         mesh%lons(i + 1, 1) = mesh%startLon + real(i) * delta
+         mesh%lons(i + 1, 1) = mesh%lons(i + 1, 1) * pi_const / 180.0
       end do
+
 
       mesh%valid = .true.
 
