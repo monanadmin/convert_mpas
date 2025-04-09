@@ -11,6 +11,8 @@ module target_mesh
       real :: endLon = 0.0
       real, dimension(:, :), pointer :: lats => null()
       real, dimension(:, :), pointer :: lons => null()
+      real, dimension(:, :), pointer :: latsDegree => null()
+      real, dimension(:, :), pointer :: lonsDegree => null()
    end type target_mesh_type
 
 contains
@@ -45,6 +47,9 @@ contains
          mesh%nLon = size(lon2d, 1)
          mesh%lats => lat2d
          mesh%lons => lon2d
+         mesh%latsDegree => lat2d
+         mesh%lonsDegree => lon2d
+
          mesh%valid = .true.
 
          return
@@ -120,16 +125,18 @@ contains
          mesh%nLon = 720
       end if
 
-      allocate (mesh%lats(1, mesh%nLat))
+      allocate (mesh%lats(1        , mesh%nLat))
       allocate (mesh%lons(mesh%nLon, 1))
+      allocate (mesh%latsDegree(1        , mesh%nLat))
+      allocate (mesh%lonsDegree(mesh%nLon, 1))
 
       ! Calculate delta for latitude
       delta = (mesh%endLat - mesh%startLat) / real(mesh%nLat - 1)
       write (0, *) 'Delta Lat = ', delta
       ! Generate latitude values
       do i = 0, mesh%nLat - 1
-         mesh%lats(1, i + 1) = mesh%startLat + real(i) * delta
-         mesh%lats(1, i + 1) = mesh%lats(1, i + 1) * pi_const / 180.0
+         mesh%latsDegree(1, i + 1) = mesh%startLat + real(i) * delta
+         mesh%lats(1, i + 1) = mesh%latsDegree(1, i + 1) * pi_const / 180.0
       end do
 
       ! Calculate delta for longitude
@@ -137,8 +144,8 @@ contains
       write (0, *) 'Delta Lon = ', delta
       ! Generate longitude values
       do i = 0, mesh%nLon - 1
-         mesh%lons(i + 1, 1) = mesh%startLon + real(i) * delta
-         mesh%lons(i + 1, 1) = mesh%lons(i + 1, 1) * pi_const / 180.0
+         mesh%lonsDegree(i + 1, 1) = mesh%startLon + real(i) * delta
+         mesh%lons(i + 1, 1) = mesh%lonsDegree(i + 1, 1) * pi_const / 180.0
       end do
 
 
