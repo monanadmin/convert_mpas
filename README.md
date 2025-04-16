@@ -1,7 +1,7 @@
 convert_mpas
 ============
 
-Version 1.0.1
+Version 1.1.0
 
 The 'convert_mpas' project aims to develop a general framework for mapping 
 native MPAS output to other meshes.
@@ -15,8 +15,10 @@ This fork is being used as a MONAN (Model for Ocean-laNd-Atmosphere predictioN) 
 
 #### History
 
-- 1.0.0 - enabling output in grads format.
+- 1.1.0 - Fix some meshes details and levels setup for converting 3d vars directly.
 - 1.0.1 - Fix mesh setup
+- 1.0.0 - enabling output in grads format.
+
 ---
 
 ## Compiling:

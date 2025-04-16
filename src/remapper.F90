@@ -1078,7 +1078,7 @@ contains
       lat_field%dimlens(1) = remap_info%dst_mesh%nlat
 
       allocate (lat_field%array1r(lat_field%dimlens(1)))
-      lat_field%array1r(:) = remap_info%dst_mesh%lats(1, :)*rad2deg
+      lat_field%array1r(:) = remap_info%dst_mesh%latsDegree(1, :)
 
    end function remap_get_target_latitudes
 
@@ -1105,7 +1105,7 @@ contains
       lon_field%dimlens(1) = remap_info%dst_mesh%nlon
 
       allocate (lon_field%array1r(lon_field%dimlens(1)))
-      lon_field%array1r(:) = remap_info%dst_mesh%lons(:, 1)*rad2deg
+      lon_field%array1r(:) = remap_info%dst_mesh%lonsDegree(:, 1)
 
    end function remap_get_target_longitudes
 
