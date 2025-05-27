@@ -17,7 +17,7 @@ program convert_mpas
                        remap_timer, &
                        write_timer
 
-   integer :: stat
+   integer :: stat, ivar
    character(len=1024) :: mesh_filename, data_filename, Time_Label, filename
    type(mpas_mesh_type) :: source_mesh
    type(target_mesh_type) :: destination_mesh
@@ -265,7 +265,16 @@ program convert_mpas
                   write (0, *) 'error at verticalCoord=', trim(verticalCoord)
                   stop 44
                end if
-
+               
+               ! Changing field output name: first include_fields column by second one
+               ! target_field%name <- include_field_list%fieldNamesOut
+               do ivar=1,include_field_list%num_fields
+                  if(TRIM(include_field_list%fieldNames(ivar)) == TRIM(field%name))then
+                     target_field % name = TRIM(include_field_list%fieldNamesOut(ivar))
+                     exit
+                  end if
+               end do
+               
                stat = file_output_register_field(output_handle, target_field)
                stat = copy_field_atts(handle, field, output_handle, target_field)
                if (stat /= 0) then
@@ -378,6 +387,15 @@ program convert_mpas
                call timer_stop(write_timer)
                write (0, '(a,f10.6,a)') '    write: ', timer_time(write_timer), ' s'
 
+               ! Changing field output name: first include_fields column by second one
+               ! target_field%name <- include_field_list%fieldNamesOut
+               do ivar=1,include_field_list%num_fields
+                  if(TRIM(include_field_list%fieldNames(ivar)) == TRIM(field%name))then
+                     target_field % name = TRIM(include_field_list%fieldNamesOut(ivar))
+                     exit
+                  end if
+               end do
+               
                stat = free_target_field(target_field)
             else if ((trim(field%name) == 't_iso_levels' .or. trim(field%name) == 'z_iso_levels' &
                       .or. trim(field%name) == 'u_iso_levels') .and. trim(verticalCoord) == 'Pressure') then

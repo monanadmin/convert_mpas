@@ -5,6 +5,7 @@ module field_list
    type field_list_type
       integer :: num_fields = 0
       character(len=64), dimension(:), pointer :: fieldNames => null()
+      character(len=64), dimension(:), pointer :: fieldNamesOut => null()
    end type field_list_type
 
 contains
@@ -38,10 +39,12 @@ contains
          write (0, *) 'Found ', nlines, ' lines in ''include_fields'' file'
          include_list%num_fields = nlines
          allocate (include_list%fieldNames(include_list%num_fields))
+         allocate (include_list%fieldNamesOut(include_list%num_fields))
          i = 1
          do j = 1, nlines
-            read (21, fmt=*, iostat=iostatus) include_list%fieldNames(i)
+            read (21, fmt=*, iostat=iostatus) include_list%fieldNames(i), include_list%fieldNamesOut(i)
             if (iostatus == 0) then
+               print*, j, "IN: ", include_list%fieldNames(i), "OUT: ", include_list%fieldNamesOut(i)
                i = i + 1
             else
                write (0, *) 'Error while reading line ', j, ' of file ''include_fields'''
@@ -98,6 +101,7 @@ contains
 
       if (associated(include_list%fieldNames)) then
          deallocate (include_list%fieldNames)
+         deallocate (include_list%fieldNamesOut)
       end if
       if (associated(exclude_list%fieldNames)) then
          deallocate (exclude_list%fieldNames)
