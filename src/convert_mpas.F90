@@ -381,12 +381,6 @@ program convert_mpas
                stat = remap_field(remap_info, field, target_field)
                call timer_stop(remap_timer)
                write (0, '(a,f10.6,a)') '    remap: ', timer_time(remap_timer), ' s'
-
-               call timer_start(write_timer)
-               stat = file_output_write_field(output_handle, target_field, frame=(nRecordsOut + iRec))
-               call timer_stop(write_timer)
-               write (0, '(a,f10.6,a)') '    write: ', timer_time(write_timer), ' s'
-
                ! Changing field output name: first include_fields column by second one
                ! target_field%name <- include_field_list%fieldNamesOut
                do ivar=1,include_field_list%num_fields
@@ -395,7 +389,13 @@ program convert_mpas
                      exit
                   end if
                end do
-               
+
+
+               call timer_start(write_timer)
+               stat = file_output_write_field(output_handle, target_field, frame=(nRecordsOut + iRec))
+               call timer_stop(write_timer)
+               write (0, '(a,f10.6,a)') '    write: ', timer_time(write_timer), ' s'
+
                stat = free_target_field(target_field)
             else if ((trim(field%name) == 't_iso_levels' .or. trim(field%name) == 'z_iso_levels' &
                       .or. trim(field%name) == 'u_iso_levels') .and. trim(verticalCoord) == 'Pressure') then

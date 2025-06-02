@@ -9,8 +9,6 @@ module load ohpc
 module load phdf5
 module load netcdf
 module load netcdf-fortran
+module load opengrads/2.2.1
 
-# for cdo, if you use in test/functional
-# module load phdf5
-#module load cdo-2.0.4-gcc-9.4.0-bjulvnd
 module list
