@@ -1,13 +1,13 @@
 convert_mpas
 ============
 
-Version 1.1.0
+Version 1.2.0
 
 The 'convert_mpas' project aims to develop a general framework for mapping 
-native MPAS output to other meshes.
+native MPAS output to other meshes. Forked originally form MDuda repository.
 
 ---
-### MONAN Version
+### Convert MPAS Version
 
 #### About
 
@@ -15,6 +15,7 @@ This fork is being used as a MONAN (Model for Ocean-laNd-Atmosphere predictioN) 
 
 #### History
 
+- 1.2.0 - Now it is possible to chose the variables names you want to be in the NC output files. The namelist `include_fields` must to have two columns now: <original_MONAN_var_name> <post_processed_output_var_name> .
 - 1.1.0 - Fix some meshes details and levels setup for converting 3d vars directly.
 - 1.0.1 - Fix mesh setup
 - 1.0.0 - enabling output in grads format.
